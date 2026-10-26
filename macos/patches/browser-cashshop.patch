@@ -1,0 +1,172 @@
+diff --git a/src/client/Gameplay/CashShop.cpp b/src/client/Gameplay/CashShop.cpp
+index 09fb7b9..971b11e 100644
+--- a/src/client/Gameplay/CashShop.cpp
++++ b/src/client/Gameplay/CashShop.cpp
+@@ -3,10 +3,12 @@
+ #include "Stage.h"
+ #include "../Data/CashShopCatalog.h"
+ #include "../IO/UI.h"
++#include "../IO/Components/CashShopAssets.h"
+ #include "../IO/UITypes/UINotice.h"
+ #include "../Net/Packets/CashShopPackets.h"
+ #include "../Net/Packets/LoginPackets.h"
+ #include "../Net/Session.h"
++#include "nlnx/nx.hpp"
+ #ifdef MS_PLATFORM_WASM
+ #include "../LazyFS/LazyFS.h"
+ #endif
+@@ -23,15 +25,21 @@ namespace jrc
+             return;
+         try
+         {
+-            if (!skin_file.root())
++            if (!skin_node)
+             {
++                skin_node = cash_shop_assets(nl::nx::ui, [this]() {
++                    if (!skin_file.root())
++                    {
+ #ifdef MS_PLATFORM_WASM
+-                if (!LazyFS::RegisterFile("UI_83.nx", "/assets/UI_83.nx"))
+-                    throw std::runtime_error("The classic Cash Shop requires UI_83.nx.");
++                        if (!LazyFS::RegisterFile("UI_83.nx", "/assets/UI_83.nx"))
++                            throw std::runtime_error("Cash Shop artwork could not be loaded.");
+ #endif
+-                skin_file.open("UI_83.nx");
++                        skin_file.open("UI_83.nx");
++                    }
++                    return skin_file.root();
++                });
+             }
+-            if (!skin()["Base"]["backgrnd"] || CashShopCatalog::get().all().empty())
++            if (!skin_node || CashShopCatalog::get().all().empty())
+                 throw std::runtime_error("Cash Shop artwork or catalog is unavailable.");
+         }
+         catch (const std::exception& error)
+diff --git a/src/client/Gameplay/CashShop.h b/src/client/Gameplay/CashShop.h
+index d851cc3..616df81 100644
+--- a/src/client/Gameplay/CashShop.h
++++ b/src/client/Gameplay/CashShop.h
+@@ -51,7 +51,7 @@ namespace jrc
+         bool busy() const { return pending != Operation::NONE || !purchase_queue.empty(); }
+         bool active() const { return state != State::CLOSED; }
+         bool ready() const { return state == State::OPEN && balances_ready && !busy(); }
+-        nl::node skin() const { return skin_file.root()["CashShop.img"]; }
++        nl::node skin() const { return skin_node; }
+ 
+         State state = State::CLOSED;
+         Operation pending = Operation::NONE;
+@@ -82,6 +82,7 @@ namespace jrc
+         int32_t queue_currency = 1;
+         bool processing_queue = false;
+         nl::file skin_file;
++        nl::node skin_node;
+         std::chrono::steady_clock::time_point started;
+     };
+ }
+diff --git a/src/client/IO/Components/CashShopAssets.h b/src/client/IO/Components/CashShopAssets.h
+new file mode 100644
+index 0000000..248ff87
+--- /dev/null
++++ b/src/client/IO/Components/CashShopAssets.h
+@@ -0,0 +1,44 @@
++#pragma once
++
++#include "nlnx/bitmap.hpp"
++#include "nlnx/node.hpp"
++
++namespace jrc
++{
++    inline nl::node classic_cash_shop_assets(nl::node ui)
++    {
++        const auto skin = ui["CashShop.img"];
++        const auto background = skin["Base"]["backgrnd"].get_bitmap();
++        const auto card = skin["CSList"]["Base"].get_bitmap();
++        // Later clients reuse CashShop.img with different geometry. Accept the
++        // layout this renderer actually supports, rather than a file name.
++        if (background.width() != 800 || background.height() != 600 ||
++            card.width() != 200 || card.height() != 80)
++            return {};
++
++        for (int tab = 1; tab <= 9; ++tab)
++            if (skin["CSTab"]["Tab"][tab].get_bitmap().width() != 508)
++                return {};
++        for (int scene = 0; scene < 3; ++scene)
++            if (skin["Base"]["Preview"][scene].data_type() != nl::node::type::bitmap)
++                return {};
++        for (const auto path : {
++            "CSList/BtBuy", "CSList/BtGift", "CSList/BtReserve", "CSList/BtRemove",
++            "CSStatus/BtExit", "CSStatus/BtCharge", "CSStatus/BtCheck", "CSStatus/BtCoupon",
++            "CSChar/BtBuyAvatar", "CSChar/BtDefaultAvatar", "CSChar/BtTakeoffAvatar",
++            "CSItemSearch/BtSearch", "CSInventory/BtExEquip", "CSInventory/BtExConsume",
++            "CSInventory/BtExInstall", "CSInventory/BtExEtc", "CSInventory/BtExTrunk"})
++            if (skin.resolve(path)["normal"]["0"].data_type() != nl::node::type::bitmap)
++                return {};
++        return skin;
++    }
++
++    template <typename LoadFallback>
++    nl::node cash_shop_assets(nl::node loaded_ui, LoadFallback load_fallback)
++    {
++        const auto loaded = classic_cash_shop_assets(loaded_ui);
++        // A normal v83 installation already loaded these assets as UI.nx.
++        // Avoid a second stream/cache entry and an unnecessary network request.
++        return loaded ? loaded : classic_cash_shop_assets(load_fallback());
++    }
++}
+diff --git a/tests/cash_shop_assets_test.cpp b/tests/cash_shop_assets_test.cpp
+index f3e2b6b..51abf62 100644
+--- a/tests/cash_shop_assets_test.cpp
++++ b/tests/cash_shop_assets_test.cpp
+@@ -1,10 +1,52 @@
+ #include "support/assets.h"
+ #include <doctest/doctest.h>
+ #include "client/Data/CashShopCatalog.h"
++#include "client/IO/Components/CashShopAssets.h"
+ #include "nlnx/nx.hpp"
+ #include "nlnx/node.hpp"
+ #include "nlnx/bitmap.hpp"
+ #include <iostream>
++#include <stdexcept>
++
++TEST_CASE("Cash Shop uses canonical UI.nx without requesting an optional asset file")
++{
++    test_support::NxFile classic("UI.nx", nl::nx::ui);
++    REQUIRE(jrc::classic_cash_shop_assets(nl::nx::ui));
++    bool fallback_called = false;
++    const auto skin = jrc::cash_shop_assets(nl::nx::ui, [&]() -> nl::node {
++        fallback_called = true;
++        throw std::runtime_error("Optional asset file is not deployed");
++    });
++    CHECK_FALSE(fallback_called);
++    CHECK(skin == nl::nx::ui["CashShop.img"]);
++}
++
++TEST_CASE("Cash Shop loads a separate classic skin when the loaded artwork is incompatible")
++{
++    test_support::NxFile classic("UI_83.nx");
++    int fallback_calls = 0;
++    const auto skin = jrc::cash_shop_assets(classic.root()["UIWindow.img"], [&]() {
++        ++fallback_calls;
++        return classic.root();
++    });
++    REQUIRE(skin);
++    CHECK(fallback_calls == 1);
++    CHECK(skin == classic.root()["CashShop.img"]);
++}
++
++TEST_CASE("Cash Shop rejects missing artwork and preserves the optional classic fallback")
++{
++    test_support::NxFile classic("UI_83.nx");
++    int fallback_calls = 0;
++    const auto skin = jrc::cash_shop_assets({}, [&]() {
++        ++fallback_calls;
++        return classic.root();
++    });
++    CHECK(fallback_calls == 1);
++    CHECK(skin == classic.root()["CashShop.img"]);
++    CHECK_FALSE(jrc::cash_shop_assets(classic.root()["UIWindow.img"], [] { return nl::node{}; }));
++    CHECK_FALSE(jrc::classic_cash_shop_assets({}));
++}
+ 
+ TEST_CASE("Classic cash shop artwork and catalog remain usable")
+ {

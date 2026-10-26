@@ -62,6 +62,8 @@ dialogs, inventory/equipment/stats/skills, maps, shops/storage and quantity
 prompts. It also aligns browser rendering with mouse coordinates, restores
 keyboard/PIC focus, prevents input from reaching windows behind a modal, and
 shows server rejection messages and connection recovery controls.
+The Cash Shop uses the classic artwork already in the supplied `UI.nx`;
+this installation does not require a separate `UI_83.nx` download.
 A newer `UI.wz` is not required for this setup. This is an alternative client under
 active development; some menus and gameplay features differ from the Windows
 client. It is not a complete recreation of every original feature.
