@@ -1,0 +1,223 @@
+diff --git a/src/client/Net/Handlers/MapObjectHandlers.cpp b/src/client/Net/Handlers/MapObjectHandlers.cpp
+--- a/src/client/Net/Handlers/MapObjectHandlers.cpp
++++ b/src/client/Net/Handlers/MapObjectHandlers.cpp
+@@ -20,6 +20,7 @@
+ #include "Helpers/LoginParser.h"
+ #include "Helpers/MobTemporaryStatMasks.h"
+ #include "Helpers/MovementParser.h"
++#include "Helpers/RemoteDamage.h"
+ 
+ #include "../../Audio/Audio.h"
+ #include "../../Gameplay/Stage.h"
+@@ -278,6 +279,14 @@
+     }
+ 
+ 
++    void DamagePlayerHandler::handle(InPacket& recv) const
++    {
++        const auto hit = RemoteDamage::parse(recv);
++        if (auto character = Stage::get().get_chars().get_char(hit.character_id))
++            character->show_damage(hit.damage);
++    }
++
++
+     void UpdateCharLookHandler::handle(InPacket& recv) const
+     {
+         int32_t cid = recv.read_int();
+diff --git a/src/client/Net/Handlers/MapObjectHandlers.h b/src/client/Net/Handlers/MapObjectHandlers.h
+--- a/src/client/Net/Handlers/MapObjectHandlers.h
++++ b/src/client/Net/Handlers/MapObjectHandlers.h
+@@ -47,6 +47,14 @@
+     // Move a character.
+     // Opcode: CHAR_MOVED(185)
+     class CharMovedHandler : public PacketHandler
++    {
++        void handle(InPacket& recv) const override;
++    };
++
++
++    // Show a remote player's hit number and invincibility flash.
++    // Opcode: DAMAGE_PLAYER(192)
++    class DamagePlayerHandler : public PacketHandler
+     {
+         void handle(InPacket& recv) const override;
+     };
+diff --git a/src/client/Net/PacketSwitch.cpp b/src/client/Net/PacketSwitch.cpp
+--- a/src/client/Net/PacketSwitch.cpp
++++ b/src/client/Net/PacketSwitch.cpp
+@@ -123,6 +123,7 @@
+         ATTACKED_RANGED = 187,
+         ATTACKED_MAGIC  = 188,
+ 
++        DAMAGE_PLAYER         = 192,
+         SHOW_ITEM_EFFECT      = 194,
+         SHOW_CHAIR            = 196,
+         UPDATE_CHARLOOK       = 197,
+@@ -188,6 +189,7 @@
+         // MapObject handlers
+         emplace<SPAWN_CHAR, SpawnCharHandler>();
+         emplace<CHAR_MOVED, CharMovedHandler>();
++        emplace<DAMAGE_PLAYER, DamagePlayerHandler>();
+         emplace<UPDATE_CHARLOOK, UpdateCharLookHandler>();
+         emplace<SHOW_FOREIGN_EFFECT, ShowForeignEffectHandler>();
+         emplace<REMOVE_CHAR, RemoveCharHandler>();
+diff --git a/src/client/Gameplay/MapleMap/Drop.h b/src/client/Gameplay/MapleMap/Drop.h
+--- a/src/client/Gameplay/MapleMap/Drop.h
++++ b/src/client/Gameplay/MapleMap/Drop.h
+@@ -32,6 +32,7 @@
+         void expire(int8_t, const PhysicsObject*);
+ 
+         Rectangle<int16_t> bounds() const;
++        bool is_private_resident_loot() const;
+ 
+     protected:
+         Drop(int32_t oid, int32_t owner, Point<int16_t> start,
+diff --git a/src/client/Gameplay/MapleMap/Drop.cpp b/src/client/Gameplay/MapleMap/Drop.cpp
+--- a/src/client/Gameplay/MapleMap/Drop.cpp
++++ b/src/client/Gameplay/MapleMap/Drop.cpp
+@@ -16,6 +16,7 @@
+ // along with this program.  If not, see <http://www.gnu.org/licenses/>.    //
+ //////////////////////////////////////////////////////////////////////////////
+ #include "Drop.h"
++#include "DropPickupPolicy.h"
+ 
+ namespace jrc
+ {
+@@ -125,6 +126,11 @@
+         }
+     }
+ 
++    bool Drop::is_private_resident_loot() const
++    {
++        return DropPickupPolicy::is_private_resident_loot(owner, pickuptype);
++    }
++
+     Rectangle<int16_t> Drop::bounds() const
+     {
+         auto lt = get_position();
+diff --git a/src/client/Gameplay/MapleMap/MapDrops.cpp b/src/client/Gameplay/MapleMap/MapDrops.cpp
+--- a/src/client/Gameplay/MapleMap/MapDrops.cpp
++++ b/src/client/Gameplay/MapleMap/MapDrops.cpp
+@@ -116,6 +116,9 @@
+ 
+     void MapDrops::try_pickup(int32_t oid, const Drop& drop, Point<int16_t> playerpos, int32_t& closest_distance_sq, Loot& closest_loot) const
+     {
++        if (drop.is_private_resident_loot())
++            return;
++
+         Point<int16_t> position = drop.get_position();
+         Point<int16_t> center = position + Point<int16_t>(16, 16);
+ 
+diff --git a/tests/packet_test.cpp b/tests/packet_test.cpp
+--- a/tests/packet_test.cpp
++++ b/tests/packet_test.cpp
+@@ -1,5 +1,7 @@
+ #include "support/packet_fixture.h"
+ #include "client/Net/PacketError.h"
++#include "client/Net/Handlers/Helpers/RemoteDamage.h"
++#include "client/Gameplay/MapleMap/DropPickupPolicy.h"
+ 
+ #include <array>
+ #include <limits>
+@@ -95,3 +97,55 @@
+     InPacket input(bytes.data(), bytes.size());
+     CHECK_THROWS_AS(input.read_string(), PacketError);
+ }
++
++TEST_CASE("Foreign hits retain character identity and damage across v83 source variants")
++{
++    PacketFixture packet(0xC0);
++    packet.write_int(1'800'000'021);
++    int8_t source = -1;
++    SUBCASE("contact") { source = -1; }
++    SUBCASE("poison reserved field") { source = -3; }
++    SUBCASE("environment") { source = -4; }
++    SUBCASE("monster skill") { source = 1; }
++    packet.write_byte(source);
++    if (source == -3)
++        packet.write_int(0x11223344);
++    packet.write_int(37);
++    packet.write_int(100100); // Remaining metadata must not become the damage.
++    auto input = packet.input();
++    const auto hit = jrc::RemoteDamage::parse(input);
++    CHECK(hit.character_id == 1'800'000'021);
++    CHECK(hit.damage == 37);
++    CHECK(input.read_int() == 100100);
++}
++
++TEST_CASE("Foreign misses and truncated poison packets preserve safe hit parsing")
++{
++    SUBCASE("zero damage remains a miss")
++    {
++        PacketFixture packet(0xC0);
++        packet.write_int(52);
++        packet.write_byte(-1);
++        packet.write_int(0);
++        auto input = packet.input();
++        CHECK(jrc::RemoteDamage::parse(input).damage == 0);
++    }
++    SUBCASE("missing poison amount is rejected")
++    {
++        const std::array<int8_t, 10> bytes{52,0,0,0,-3,0,0,0,0,42};
++        InPacket input(bytes.data(),bytes.size());
++        CHECK_THROWS_AS(jrc::RemoteDamage::parse(input), PacketError);
++    }
++}
++
++TEST_CASE("Private resident loot cannot mask human drops or change public pickup rules")
++{
++    using jrc::DropPickupPolicy::is_private_resident_loot;
++    CHECK(is_private_resident_loot(1'800'000'021, 0));
++    CHECK(is_private_resident_loot(1'800'000'000, 0));
++    CHECK_FALSE(is_private_resident_loot(1'799'999'999, 0));
++    CHECK_FALSE(is_private_resident_loot(123, 0));
++    CHECK_FALSE(is_private_resident_loot(1'800'000'021, 1));
++    CHECK_FALSE(is_private_resident_loot(1'800'000'021, 2));
++    CHECK_FALSE(is_private_resident_loot(1'800'000'021, 3));
++}
+diff --git a/src/client/Net/Handlers/Helpers/RemoteDamage.h b/src/client/Net/Handlers/Helpers/RemoteDamage.h
+new file mode 100644
+--- /dev/null
++++ b/src/client/Net/Handlers/Helpers/RemoteDamage.h
+@@ -0,0 +1,24 @@
++#pragma once
++#include "../../InPacket.h"
++
++namespace jrc::RemoteDamage
++{
++    struct Hit
++    {
++        int32_t character_id;
++        int32_t damage;
++    };
++
++    inline Hit parse(InPacket& recv)
++    {
++        const int32_t character_id = recv.read_int();
++        const int8_t source = recv.read_byte();
++        // v83 poison damage includes a reserved int before the amount.
++        if (source == -3)
++            recv.skip(4);
++        const int32_t damage = recv.read_int();
++        // Monster/reflection metadata follows, but hit display needs only this
++        // common prefix. Knockback remains authoritative movement from the server.
++        return {character_id, damage};
++    }
++}
+diff --git a/src/client/Gameplay/MapleMap/DropPickupPolicy.h b/src/client/Gameplay/MapleMap/DropPickupPolicy.h
+new file mode 100644
+--- /dev/null
++++ b/src/client/Gameplay/MapleMap/DropPickupPolicy.h
+@@ -0,0 +1,12 @@
++#pragma once
++#include <cstdint>
++
++namespace jrc::DropPickupPolicy
++{
++    constexpr bool is_private_resident_loot(int32_t owner, int8_t pickup_type)
++    {
++        // Cosmic reserves this network-id range for residents, never accounts.
++        // Public drops and ordinary player ownership retain existing behavior.
++        return owner >= 1'800'000'000 && pickup_type == 0;
++    }
++}
