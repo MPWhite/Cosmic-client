@@ -45,8 +45,8 @@ Start `../Cosmic/launch-macos.command`, then double-click
 <http://127.0.0.1:8000>. Keep the server and client launcher terminals running.
 
 For the bundled test account, log in with **admin / admin**, choose a channel,
-select **Admin**, and click **Start**. Enter PIC **000000** on the onscreen keypad;
-its digits move after each click. Click inside the game to focus the keyboard.
+select **Admin**, and click **Start**. Enter PIC **000000** using the keyboard or onscreen keypad;
+the onscreen digits move after each click. Click inside the game to focus the keyboard.
 
 Setup installs the build dependencies, downloads the repository's Git LFS files,
 extracts the missing vanilla WZ data, converts the assets to NX, and compiles the
@@ -56,11 +56,36 @@ All downloaded tools, generated assets, and build output stay in `.local/`.
 Original WZ files are read-only inputs.
 
 The source revisions are pinned in `setup-macos.sh`. Patches in `macos/patches/`
-make the converter work on macOS, add support for the included v83 login and
-channel assets, and fix the PIC prompt and incorrect-PIC response. A newer
-`UI.wz` is not required for this setup. This is an alternative client under
+make the converter work on macOS and adapt the browser client to the supplied
+v83 UI. The UI patch restores login/character screens, the HUD and chat, NPC
+dialogs, inventory/equipment/stats/skills, maps, shops/storage and quantity
+prompts. It also aligns browser rendering with mouse coordinates, restores
+keyboard/PIC focus, prevents input from reaching windows behind a modal, and
+shows server rejection messages and connection recovery controls.
+A newer `UI.wz` is not required for this setup. This is an alternative client under
 active development; some menus and gameplay features differ from the Windows
 client. It is not a complete recreation of every original feature.
+
+After updating the patches, rerun `./setup-macos.sh` and refresh the browser.
+Setup supports both a fresh checkout and one with the earlier bootstrap patch.
+For native regression checks against the actual converted v83 assets, run:
+
+```sh
+./macos/verify-browser-ui.sh
+```
+
+The check creates read-only asset symlinks under `.local/ui-test-assets` and
+runs the upstream C++ test suite plus compatibility regressions. CMake needs
+FreeType for these optional native tests (`brew install freetype` if missing).
+The UI repair was also tested in Chrome: PIC login, NPC Next/Back/cancel and
+quest acceptance, core windows, scaled mouse input, shop purchase quantities,
+storage deposits/withdrawals, reconnecting, and modal input protection.
+Native tests do not replace gameplay testing.
+
+Known gaps remain in this alternative client: MTS/reporting, inventory expansion
+and dropping mesos, and specialized NPC appearance/quiz/dimensional-mirror
+windows. Unavailable controls are hidden/disabled, and unsupported NPC dialog
+types show a closable message. These are not implemented by the UI patch.
 
 The web server uses port **8000**, the game WebSocket bridge **8080**, and asset
 streaming **8765**, all bound to `127.0.0.1`. Cosmic's login server must be running

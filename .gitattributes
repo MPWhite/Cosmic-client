@@ -6,5 +6,5 @@
 README.md export-ignore
 MapleGlobal-v83-setup.exe export-ignore
 
-# Unified patches use a space to mark empty context lines.
-macos/patches/*.patch whitespace=-blank-at-eol
+# Unified patches prefix context lines, including tab-indented ones, with a space.
+macos/patches/*.patch whitespace=-blank-at-eol,-space-before-tab

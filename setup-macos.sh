@@ -54,7 +54,13 @@ apply_local_patch() {
 checkout_source "$BROWSER_ROOT" https://github.com/nmnsnv/maplestory-wasm.git 9eef4c730ff5639089eeccae51bf6266c878c30c
 checkout_source "$STATE/wz-converter" https://github.com/ryantpayton/NoLifeWzToNx.git 73bddde1214445795d0a5cd4c3d431fe15eb49eb
 checkout_source "$STATE/emsdk" https://github.com/emscripten-core/emsdk.git d7b4130688bfa348392b921ab04015aa15c4f154
-apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-v83.patch"
+# The UI repair patch layers on the original bootstrap patch. Once both are
+# installed, later edits can overlap the bootstrap's hunks, so test the final
+# layer first when deciding whether an existing checkout needs migration.
+if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-ui-v83.patch" 2>/dev/null; then
+    apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-v83.patch"
+    apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-ui-v83.patch"
+fi
 apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-resident-movement.patch"
 apply_local_patch "$STATE/wz-converter" "$CLIENT_ROOT/macos/patches/wz-converter-macos.patch"
 
