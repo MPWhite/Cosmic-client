@@ -170,7 +170,7 @@ index f83ef70..3d60f23 100644
      private:
          void modifytext(const std::string&);
 diff --git a/src/client/IO/UI.cpp b/src/client/IO/UI.cpp
-index e8eb216..38cddd4 100644
+index e8eb216..222b2f5 100644
 --- a/src/client/IO/UI.cpp
 +++ b/src/client/IO/UI.cpp
 @@ -28,6 +28,24 @@
@@ -183,22 +183,29 @@ index e8eb216..38cddd4 100644
 +extern "C" {
 +    EMSCRIPTEN_KEEPALIVE void maple_mobile_action(int action, int pressed)
 +    {
-+        jrc::UI::get().send_mobile_action(action, pressed != 0);
++        jrc::UI::get().enqueue_mobile_action(action, pressed != 0);
 +    }
 +    EMSCRIPTEN_KEEPALIVE void maple_mobile_command(int command)
 +    {
-+        jrc::UI::get().send_mobile_command(command);
++        jrc::UI::get().enqueue_mobile_command(command);
 +    }
-+    EMSCRIPTEN_KEEPALIVE void maple_mobile_text(unsigned int token, const char* value)
++    EMSCRIPTEN_KEEPALIVE void maple_mobile_text(unsigned int token, const char* value, unsigned int revision)
 +    {
-+        jrc::UI::get().set_mobile_text(token, value);
++        jrc::UI::get().enqueue_mobile_text(token, value, revision);
 +    }
 +}
 +#endif
  
  namespace jrc
  {
-@@ -59,6 +77,9 @@ namespace jrc
+@@ -55,10 +73,16 @@ namespace jrc
+ 
+     void UI::update()
+     {
++#ifdef MS_PLATFORM_WASM
++        process_mobile_inputs();
++#endif
+         state->update();
  
          scrollingnotice.update();
          cursor.update();
@@ -208,7 +215,7 @@ index e8eb216..38cddd4 100644
      }
  
      void UI::enable()
-@@ -87,6 +108,9 @@ namespace jrc
+@@ -87,6 +111,9 @@ namespace jrc
              state = std::make_unique<UIStateGame>();
              break;
          }
@@ -218,7 +225,7 @@ index e8eb216..38cddd4 100644
      }
  
      void UI::quit()
-@@ -324,6 +348,9 @@ namespace jrc
+@@ -324,6 +351,9 @@ namespace jrc
          }
  
          focusedtextfield = tofocus;
@@ -228,11 +235,66 @@ index e8eb216..38cddd4 100644
      }
  
      void UI::blur_textfield(Textfield* textfield)
-@@ -344,6 +371,101 @@ namespace jrc
+@@ -344,6 +374,164 @@ namespace jrc
          focusedtextfield = {};
      }
  
 +#ifdef MS_PLATFORM_WASM
++    void UI::enqueue_mobile_action(int32_t action, bool pressed)
++    {
++        mobile_inputs.push_back({MobileInput::ACTION, action, pressed, 0, {}});
++    }
++
++    void UI::enqueue_mobile_command(int32_t command)
++    {
++        mobile_inputs.push_back({MobileInput::COMMAND, command, false, 0, {}});
++    }
++
++    void UI::enqueue_mobile_text(uint32_t token, const char* value, uint32_t revision)
++    {
++        // ccall's string buffer expires on return. Keep an owned copy, and
++        // collapse successive edits while the game is waiting for an asset.
++        if (!value) return;
++        if (!mobile_inputs.empty() && mobile_inputs.back().kind == MobileInput::TEXT
++            && mobile_inputs.back().token == token)
++        {
++            mobile_inputs.back().text = value;
++            mobile_inputs.back().value = static_cast<int32_t>(revision);
++        }
++        else
++            mobile_inputs.push_back({MobileInput::TEXT, static_cast<int32_t>(revision), false, token, value});
++    }
++
++    void UI::process_mobile_inputs()
++    {
++        // Browser exports only enqueue. Actual handlers can load NX assets and
++        // suspend through Asyncify, so they must run on the existing game loop
++        // rather than re-entering a suspended loop from a DOM event callback.
++        const size_t count = mobile_inputs.size();
++        for (size_t i = 0; i < count; ++i)
++        {
++            MobileInput input = std::move(mobile_inputs.front());
++            mobile_inputs.pop_front();
++            switch (input.kind)
++            {
++            case MobileInput::ACTION:
++                send_mobile_action(input.value, input.pressed);
++                break;
++            case MobileInput::COMMAND:
++                send_mobile_command(input.value);
++                break;
++            case MobileInput::TEXT:
++                set_mobile_text(input.token, input.text.c_str());
++                if (focusedtextfield && input.token == mobile_field_token)
++                    EM_ASM({
++                        if (window.MapleMobile)
++                            window.MapleMobile.acknowledgeText($0, $1, UTF8ToString($2));
++                    }, input.token, input.value, focusedtextfield->get_text().c_str());
++                break;
++            }
++        }
++    }
++
 +    void UI::sync_mobile_textfield()
 +    {
 +        const uint32_t token = focusedtextfield ? mobile_field_token : 0;
@@ -290,7 +352,11 @@ index e8eb216..38cddd4 100644
 +    void UI::send_mobile_command(int32_t command)
 +    {
 +        if (!enabled)
++        {
++            if (command == 7)
++                EM_ASM({ if (window.MapleMobile) window.MapleMobile.commandCompleted(false); });
 +            return;
++        }
 +        switch (command)
 +        {
 +        case 0:
@@ -324,6 +390,10 @@ index e8eb216..38cddd4 100644
 +            break;
 +        }
 +        sync_mobile_textfield();
++        if (command == 7)
++            EM_ASM({
++                if (window.MapleMobile) window.MapleMobile.commandCompleted($0);
++            }, static_cast<bool>(focusedtextfield));
 +    }
 +#endif
 +
@@ -331,14 +401,25 @@ index e8eb216..38cddd4 100644
      {
          state->drag_icon(icon);
 diff --git a/src/client/IO/UI.h b/src/client/IO/UI.h
-index b1c31d1..732af9f 100644
+index b1c31d1..765aa35 100644
 --- a/src/client/IO/UI.h
 +++ b/src/client/IO/UI.h
-@@ -66,6 +66,12 @@ namespace jrc
+@@ -29,6 +29,7 @@
+ #include "../Template/Optional.h"
+ 
+ #include <unordered_map>
++#include <deque>
+ 
+ namespace jrc
+ {
+@@ -66,6 +67,15 @@ namespace jrc
          void doubleclick();
          void send_key(int32_t keycode, bool pressed);
          void send_menu(KeyAction::Id action);
 +#ifdef MS_PLATFORM_WASM
++        void enqueue_mobile_action(int32_t action, bool pressed);
++        void enqueue_mobile_command(int32_t command);
++        void enqueue_mobile_text(uint32_t token, const char* text, uint32_t revision);
 +        void send_mobile_action(int32_t action, bool pressed);
 +        void send_mobile_command(int32_t command);
 +        void set_mobile_text(uint32_t token, const char* text);
@@ -347,11 +428,21 @@ index b1c31d1..732af9f 100644
  
          void set_scrollnotice(const std::string& notice);
          void focus_textfield(Textfield* textfield);
-@@ -101,6 +107,11 @@ namespace jrc
+@@ -101,6 +111,21 @@ namespace jrc
          Optional<Textfield> focusedtextfield;
          std::unordered_map<int32_t, bool> is_key_down;
          uint64_t cursor_press_id;
 +#ifdef MS_PLATFORM_WASM
++        struct MobileInput
++        {
++            enum Kind { ACTION, COMMAND, TEXT } kind;
++            int32_t value;
++            bool pressed;
++            uint32_t token;
++            std::string text;
++        };
++        std::deque<MobileInput> mobile_inputs;
++        void process_mobile_inputs();
 +        uint32_t mobile_field_token = 0;
 +        uint32_t mobile_synced_token = 0;
 +        std::string mobile_synced_text;
@@ -375,10 +466,10 @@ index 091d63f..d7d4055 100644
                  {
 diff --git a/tests/test_mobile_controls.py b/tests/test_mobile_controls.py
 new file mode 100644
-index 0000000..fe46c8d
+index 0000000..c9ca452
 --- /dev/null
 +++ b/tests/test_mobile_controls.py
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,151 @@
 +"""Browser-only input regressions; requires Playwright and Google Chrome.
 +
 +    python tests/test_mobile_controls.py
@@ -474,8 +565,8 @@ index 0000000..fe46c8d
 +        field.press("Tab")
 +        self.assertEqual(self.page.evaluate("gameKeys"), [])
 +        self.assertEqual(self.calls(), [
-+            ["maple_mobile_text", 17, "example"],
-+            ["maple_mobile_text", 17, "exampl"],
++            ["maple_mobile_text", 17, "example", 1],
++            ["maple_mobile_text", 17, "exampl", 2],
 +            ["maple_mobile_command", 1],
 +        ])
 +        self.page.evaluate("MapleMobile.setFocusedField(18, 'new', false, 20)")
@@ -483,6 +574,36 @@ index 0000000..fe46c8d
 +        self.assertEqual(field.get_attribute("type"), "text")
 +        self.page.evaluate("MapleMobile.setFocusedField(0, '', false, 0)")
 +        self.assertEqual(field.input_value(), "")
++        self.assertFalse(self.page.locator("#mobile-editor").is_visible())
++
++    def test_chat_focus_and_typing_survive_delayed_game_loop(self):
++        self.page.locator('[data-command="7"]').tap()
++        field = self.page.locator("#mobile-input")
++        self.assertTrue(field.is_visible())
++        self.assertTrue(field.evaluate("element => element === document.activeElement"))
++        field.fill("hello")
++        field.press("Enter")
++        self.assertEqual(self.calls(), [["maple_mobile_command", 7]])
++        self.page.evaluate("MapleMobile.setFocusedField(24, '', false, 100)")
++        self.assertEqual(field.input_value(), "hello")
++        self.assertEqual(self.calls()[-2:], [
++            ["maple_mobile_text", 24, "hello", 1], ["maple_mobile_command", 0],
++        ])
++
++    def test_old_text_acknowledgement_does_not_overwrite_newer_edit(self):
++        self.page.evaluate("MapleMobile.setGameState(0); MapleMobile.setFocusedField(17, '', false, 12)")
++        field = self.page.locator("#mobile-input")
++        field.fill("old")
++        field.fill("newer")
++        self.page.evaluate("MapleMobile.setFocusedField(17, 'old', false, 12); MapleMobile.acknowledgeText(17, 1, 'old')")
++        self.assertEqual(field.input_value(), "newer")
++        self.page.evaluate("MapleMobile.acknowledgeText(17, 2, 'newer')")
++        self.page.evaluate("MapleMobile.setFocusedField(17, '', false, 12)")
++        self.assertEqual(field.input_value(), "")
++
++    def test_blocked_chat_command_closes_pending_native_editor(self):
++        self.page.locator('[data-command="7"]').tap()
++        self.page.evaluate("MapleMobile.commandCompleted(false)")
 +        self.assertFalse(self.page.locator("#mobile-editor").is_visible())
 +
 +    def test_desktop_unchanged(self):
@@ -633,10 +754,10 @@ index 0000000..438c850
 +}
 diff --git a/web/mobile-controls.js b/web/mobile-controls.js
 new file mode 100644
-index 0000000..9608461
+index 0000000..7e2872c
 --- /dev/null
 +++ b/web/mobile-controls.js
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,239 @@
 +(function () {
 +    'use strict';
 +    const enabled = window.matchMedia('(pointer: coarse)').matches;
@@ -644,6 +765,10 @@ index 0000000..9608461
 +    let gameState = 0;
 +    let fieldToken = 0;
 +    let editing = false;
++    let awaitingField = false;
++    let deferredCommand = null;
++    let textRevision = 0;
++    let pendingRevision = 0;
 +    const pointers = new Map();
 +    const counts = new Map();
 +    const ui = document.createElement('div');
@@ -705,20 +830,34 @@ index 0000000..9608461
 +    }
 +    function command(id) {
 +        releaseAll();
++        if (awaitingField && (id === 0 || id === 1)) {
++            deferredCommand = id;
++            return;
++        }
 +        call('maple_mobile_command', ['number'], [id]);
 +    }
 +    function setEditing(value) {
-+        editing = value && !!fieldToken;
++        editing = value && (!!fieldToken || awaitingField);
 +        ui.classList.toggle('editing', editing);
 +        editor.hidden = !editing;
 +        if (!editing) input.blur();
 +    }
-+    function openKeyboard() {
-+        if (!fieldToken || !ready) return;
++    function openKeyboard(allowPending = false) {
++        if (!ready || (!fieldToken && !allowPending)) return;
++        if (!fieldToken) {
++            awaitingField = true;
++            input.value = '';
++            input.type = 'text';
++            input.maxLength = 255;
++        }
 +        releaseAll();
 +        setEditing(true);
 +        // The focus call stays inside the tap event for iOS's keyboard policy.
 +        input.focus({ preventScroll: true });
++    }
++    function sendText(value) {
++        pendingRevision = ++textRevision;
++        call('maple_mobile_text', ['number', 'string', 'number'], [fieldToken, value, pendingRevision]);
 +    }
 +    function updateViewport() {
 +        if (!enabled) return;
@@ -733,6 +872,18 @@ index 0000000..9608461
 +        ready: function () { ready = true; },
 +        isEditing: function () { return enabled && editing; },
 +        releaseAll,
++        acknowledgeText: function (token, revision, value) {
++            if (!enabled || token !== fieldToken || revision !== pendingRevision) return;
++            pendingRevision = 0;
++            if (input.value !== value) input.value = value;
++        },
++        commandCompleted: function (hasField) {
++            if (!awaitingField || hasField) return;
++            awaitingField = false;
++            deferredCommand = null;
++            input.value = '';
++            setEditing(false);
++        },
 +        setGameState: function (state) {
 +            releaseAll();
 +            gameState = state;
@@ -744,19 +895,32 @@ index 0000000..9608461
 +            fieldToken = token;
 +            keyboard.disabled = !token;
 +            if (!token) {
++                if (awaitingField) return;
 +                input.value = '';
++                pendingRevision = 0;
 +                setEditing(false);
 +                return;
 +            }
++            const pendingValue = awaitingField ? input.value : null;
++            awaitingField = false;
++            if (changed) pendingRevision = 0;
 +            input.type = secret ? 'password' : 'text';
 +            input.maxLength = limit > 0 ? limit : 255;
-+            if (input.value !== value) input.value = value;
++            // Older game-loop acknowledgements must not replace a newer edit
++            // typed while an asset fetch was suspended.
++            if (!pendingValue && !pendingRevision && input.value !== value) input.value = value;
 +            input.setAttribute('aria-label', secret ? 'Selected password or PIC field' : 'Selected game text field');
 +            if (changed) {
 +                releaseAll();
 +                // Login gets a visible input immediately, without opening the OS
 +                // keyboard until the player taps. Game dialogs use Keyboard.
 +                if (gameState !== 1 || editing) setEditing(true);
++            }
++            if (pendingValue) sendText(pendingValue);
++            if (deferredCommand !== null) {
++                const next = deferredCommand;
++                deferredCommand = null;
++                command(next);
 +            }
 +        }
 +    };
@@ -785,17 +949,16 @@ index 0000000..9608461
 +            const id = Number(button.dataset.command);
 +            if (id === 2 && editing) { setEditing(false); return; }
 +            command(id);
-+            if (id === 7) openKeyboard();
++            if (id === 7) openKeyboard(true);
 +        });
 +    }
-+    keyboard.addEventListener('click', openKeyboard);
++    keyboard.addEventListener('click', () => openKeyboard());
 +    input.addEventListener('focus', () => { releaseAll(); setEditing(true); });
 +    input.addEventListener('input', () => {
-+        if (!fieldToken) return;
 +        // This legacy client's text renderer and protocol use single-byte text.
 +        const value = input.value.replace(/[^\x20-\x7E]/g, '');
 +        if (input.value !== value) input.value = value;
-+        call('maple_mobile_text', ['number', 'string'], [fieldToken, value]);
++        if (fieldToken) sendText(value);
 +    });
 +    document.getElementById('mobile-next').addEventListener('click', () => {
 +        command(1);
