@@ -1,0 +1,74 @@
+diff --git a/NoLifeWzToNx.cpp b/NoLifeWzToNx.cpp
+index 9ff3361..798fc11 100644
+--- a/NoLifeWzToNx.cpp
++++ b/NoLifeWzToNx.cpp
+@@ -45,7 +45,7 @@
+ #include <cstring>
+ #ifndef NL_NO_STD_FILESYSTEM
+ #include <filesystem>
+-namespace sys = std::experimental::filesystem;
++namespace sys = std::filesystem;
+ #else
+ #include <boost/filesystem.hpp>
+ namespace sys = boost::filesystem;
+@@ -334,7 +334,7 @@ struct wztonx {
+     std::string str_buf;
+     std::u16string wstr_buf;
+ #ifndef NL_NO_CODECVT
+-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> convert;
++    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
+ #endif
+     char8_t const * u8key = nullptr;
+     char16_t const * u16key = nullptr;
+@@ -354,7 +354,7 @@ struct wztonx {
+     // Methods
+     std::string convert_str(std::u16string const & p_str) {
+ #ifndef NL_NO_CODECVT
+-        auto ptr = reinterpret_cast<wchar_t const *>(p_str.c_str());
++        auto ptr = p_str.data();
+         return convert.to_bytes(ptr, ptr + p_str.size());
+ #else
+         std::array<char, 0x10000> buf;
+@@ -1187,7 +1187,9 @@ struct wztonx {
+                 std::cerr << "Unknown image format2 of" << std::dec << static_cast<unsigned>(f2) << std::endl;
+                 throw std::runtime_error("Unknown image type!");
+             }
+-            if (check != pixels * 4) {
++            // Some WZ placeholders include trailing pixel padding. The NX
++            // bitmap dimensions determine how many decoded bytes are used.
++            if (check < pixels * 4) {
+                 std::cerr << "Size mismatch: " << std::dec << width << "," << height << "," << decompressed << "," << f1 << "," << f2 << std::endl;
+                 throw std::runtime_error("halp!");
+             }
+@@ -1290,6 +1292,7 @@ Converts WZ files into NX files
+     enum { client, server, none } type{none};
+     bool hc{false};
+     bool info_only{false};
++    bool failed{false};
+     std::vector<sys::path> paths;
+     std::regex reg1{"--([a-z]+)"};
+     std::regex reg2{"-([a-z]+)"};
+@@ -1312,6 +1315,7 @@ Converts WZ files into NX files
+                 nl::wztonx{p, false, false}.detect_version();
+             }
+         } catch (std::exception const & e) {
++            failed = true;
+             std::cerr << "Error reading " << u8string(p) << ": " << e.what() << std::endl;
+             std::cout << "Error reading " << u8string(p) << ": " << e.what() << std::endl;
+         }
+@@ -1324,6 +1328,7 @@ Converts WZ files into NX files
+                 nl::wztonx{p, type == client, hc}.convert_file();
+             }
+         } catch (std::exception const & e) {
++            failed = true;
+             std::cerr << "Error converting " << u8string(p) << ": " << e.what() << std::endl;
+             std::cout << "\nError converting " << u8string(p) << ": " << e.what() << std::endl;
+         }
+@@ -1342,4 +1347,5 @@ Converts WZ files into NX files
+         << std::chrono::duration_cast<std::chrono::seconds>(b - a).count() << " seconds"
+         << std::endl;
+     std::cerr.rdbuf(old);
+-}
+\ No newline at end of file
++    return failed ? 1 : 0;
++}

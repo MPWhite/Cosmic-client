@@ -5,3 +5,6 @@
 .gitignore export-ignore
 README.md export-ignore
 MapleGlobal-v83-setup.exe export-ignore
+
+# Unified patches use a space to mark empty context lines.
+macos/patches/*.patch whitespace=-blank-at-eol

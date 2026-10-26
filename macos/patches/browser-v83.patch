@@ -1,0 +1,277 @@
+diff --git a/src/client/CMakeLists.txt b/src/client/CMakeLists.txt
+index b4da4db..7aae7d5 100644
+--- a/src/client/CMakeLists.txt
++++ b/src/client/CMakeLists.txt
+@@ -1,5 +1,5 @@
+ ## CMake file for the JourneyClient from-scratch Maplestory client ##
+-cmake_minimum_required (VERSION 3.8)
++cmake_minimum_required (VERSION 3.16)
+ project (JourneyClient)
+ 
+ set(CMAKE_CXX_STANDARD 17)
+diff --git a/src/client/IO/UITypes/UICharSelect.cpp b/src/client/IO/UITypes/UICharSelect.cpp
+index c4930b9..6705071 100644
+--- a/src/client/IO/UITypes/UICharSelect.cpp
++++ b/src/client/IO/UITypes/UICharSelect.cpp
+@@ -36,11 +36,6 @@
+ 
+ namespace jrc
+ {
+-    namespace
+-    {
+-        constexpr const char* AUTO_PIC = "1010";
+-    }
+-
+     UICharSelect::UICharSelect(std::vector<CharEntry> cs,
+                                uint8_t c,
+                                uint8_t s,
+@@ -352,15 +347,15 @@ namespace jrc
+         switch (action)
+         {
+         case PicAction::REGISTER:
+-            Console::get().print((auto_submit ? "Registering" : "Retrying registration with") + std::string(" PIC ") + pic);
++            Console::get().print("Registering PIC.");
+             RegisterPicPacket(cid, pic).dispatch();
+             break;
+         case PicAction::SELECT:
+-            Console::get().print((auto_submit ? "Selecting character with" : "Retrying character select with") + std::string(" PIC ") + pic);
++            Console::get().print("Selecting character with PIC.");
+             SelectCharPicPacket(pic, cid).dispatch();
+             break;
+         case PicAction::DELETE:
+-            Console::get().print((auto_submit ? "Deleting character with" : "Retrying deletion with") + std::string(" PIC ") + pic);
++            Console::get().print("Deleting character with PIC.");
+             DeleteCharPacket(pic, cid).dispatch();
+             break;
+         case PicAction::NONE:
+@@ -422,10 +417,10 @@ namespace jrc
+         switch (require_pic)
+         {
+         case 0:
+-            dispatch_pic_action(PicAction::REGISTER, cid, AUTO_PIC, true);
++            prompt_pic_entry(PicAction::REGISTER, cid);
+             break;
+         case 1:
+-            dispatch_pic_action(PicAction::SELECT, cid, AUTO_PIC, true);
++            prompt_pic_entry(PicAction::SELECT, cid);
+             break;
+         case 2:
+             clear_pending_pic_request();
+@@ -448,7 +443,7 @@ namespace jrc
+         }
+ 
+         int32_t cid = characters[selected_absolute].cid;
+-        dispatch_pic_action(PicAction::DELETE, cid, AUTO_PIC, true);
++        prompt_pic_entry(PicAction::DELETE, cid);
+     }
+ 
+     void UICharSelect::add_character(CharEntry&& character)
+diff --git a/src/client/IO/UITypes/UILogin.cpp b/src/client/IO/UITypes/UILogin.cpp
+index 77e9cbb..5312808 100644
+--- a/src/client/IO/UITypes/UILogin.cpp
++++ b/src/client/IO/UITypes/UILogin.cpp
+@@ -25,6 +25,7 @@
+ #include "../../Audio/Audio.h"
+ #include "../../Console.h"
+ #include "../../Graphics/Sprite.h"
++#include "../../Graphics/Geometry.h"
+ #include "../../Net/Packets/LoginPackets.h"
+ 
+ #include "nlnx/nx.hpp"
+@@ -39,6 +40,9 @@ namespace jrc
+         nl::node title  = nl::nx::ui["Login.img"]["Title"];
+         nl::node common = nl::nx::ui["Login.img"]["Common"];
+         nl::node title_new = nl::nx::ui["Login.img"]["Title_new"];
++        legacy_ui = !title["ID"] && !title["signboard"];
++        account_label = Text(Text::A11M, Text::LEFT, Text::WHITE, "Account");
++        password_label = Text(Text::A11M, Text::LEFT, Text::WHITE, "Password");
+ 
+         // Compatibility: some UI.nx variants do not have Title/11, Title/35, Title/Logo.
+         if (back["11"])
+@@ -71,7 +75,7 @@ namespace jrc
+         {
+             sprites.emplace_back(title["Logo"], Point<int16_t>(410, 130));
+         }
+-        else if (title["MSTitle"])
++        else if (title["MSTitle"] && !legacy_ui)
+         {
+             sprites.emplace_back(title["MSTitle"], Point<int16_t>(410, 130));
+         }
+@@ -112,6 +116,12 @@ namespace jrc
+         buttons[BT_QUIT]     = std::make_unique<MapleButton>(title["BtQuit"],        Point<int16_t>(455, 320));
+         buttons[BT_IDLOST]   = std::make_unique<MapleButton>(title["BtLoginIDLost"], Point<int16_t>(395, 300));
+         buttons[BT_SAVEID]   = std::make_unique<MapleButton>(title["BtLoginIDSave"], Point<int16_t>(325, 300));
++        if (legacy_ui)
++        {
++            // v83 has no form background and these links have no local action.
++            for (auto id : {BT_REGISTER, BT_HOMEPAGE, BT_PASSLOST, BT_IDLOST})
++                buttons[id]->set_active(false);
++        }
+ 
+         checkbox[false] = title["check"]["0"];
+         checkbox[true]  = title["check"]["1"];
+@@ -167,7 +177,16 @@ namespace jrc
+ 
+     void UILogin::draw(float alpha) const
+     {
+-        UIElement::draw(alpha);
++        draw_sprites(alpha);
++        if (legacy_ui)
++        {
++            ColorBox(330, 140, Geometry::BLACK, 0.80f).draw(position + Point<int16_t>(250, 230));
++            ColorBox(156, 26, Geometry::WHITE, 0.20f).draw(position + Point<int16_t>(310, 246));
++            ColorBox(156, 26, Geometry::WHITE, 0.20f).draw(position + Point<int16_t>(310, 274));
++            account_label.draw(position + Point<int16_t>(260, 254));
++            password_label.draw(position + Point<int16_t>(260, 280));
++        }
++        draw_buttons(alpha);
+ 
+         account.draw(position);
+         password.draw(position);
+diff --git a/src/client/IO/UITypes/UILogin.h b/src/client/IO/UITypes/UILogin.h
+index 0f3a556..9aff71d 100644
+--- a/src/client/IO/UITypes/UILogin.h
++++ b/src/client/IO/UITypes/UILogin.h
+@@ -63,5 +63,8 @@ namespace jrc
+         BoolPair<Texture> checkbox;
+ 
+         bool saveid;
++        bool legacy_ui;
++        Text account_label;
++        Text password_label;
+     };
+ }
+diff --git a/src/client/IO/UITypes/UIWorldSelect.cpp b/src/client/IO/UITypes/UIWorldSelect.cpp
+index 92bbba9..c200c61 100644
+--- a/src/client/IO/UITypes/UIWorldSelect.cpp
++++ b/src/client/IO/UITypes/UIWorldSelect.cpp
+@@ -19,6 +19,7 @@
+ 
+ #include "../../Configuration.h"
+ #include "../../Graphics/Sprite.h"
++#include "../../Graphics/Geometry.h"
+ #include "../../IO/UI.h"
+ #include "../../IO/Components/MapleButton.h"
+ #include "../../IO/Components/TwoSpriteButton.h"
+@@ -39,6 +40,38 @@ namespace jrc
+         nl::node channelsrc = nl::nx::ui["Login.img"]["WorldSelect"]["BtChannel"];
+         nl::node frame = nl::nx::ui["Login.img"]["Common"]["frame"];
+ 
++        if (!channelsrc)
++        {
++            legacy_ui = true;
++            sprites.emplace_back(back["11"] ? back["11"] : back["0"], Point<int16_t>(370, 300));
++            sprites.emplace_back(frame, Point<int16_t>(400, 290));
++            if (worlds.empty() || worldcount == 0)
++                return;
++
++            const World& world = worlds.front();
++            worldid = static_cast<uint8_t>(world.wid);
++            if (channelid >= world.channelcount)
++                channelid = 0;
++            nl::node legacy = nl::nx::ui["Login.img"]["WorldSelect"];
++            nl::node world_button = legacy["BtWorld"][worldid];
++            buttons[BT_WORLD0 + worldid] = std::make_unique<MapleButton>(world_button,
++                Point<int16_t>(300, 150) + Texture(world_button["normal"]["0"]).get_origin());
++            buttons[BT_WORLD0 + worldid]->set_state(Button::PRESSED);
++            nl::node enter = legacy["BtGoworld"];
++            buttons[BT_ENTERWORLD] = std::make_unique<MapleButton>(enter,
++                Point<int16_t>(330, 370) + Texture(enter["normal"]["0"]).get_origin());
++            for (uint8_t i = 0; i < world.channelcount; ++i)
++            {
++                nl::node normal = legacy["channel"][i]["normal"];
++                auto pos = Point<int16_t>(230 + (i % 5) * 68, 230 + (i / 5) * 28);
++                buttons[BT_CHANNEL0 + i] = std::make_unique<TwoSpriteButton>(normal, normal,
++                    pos + Texture(normal).get_origin());
++                if (i == channelid)
++                    buttons[BT_CHANNEL0 + i]->set_state(Button::PRESSED);
++            }
++            return;
++        }
++
+         sprites.emplace_back(back["11"], Point<int16_t>(370, 300));
+         sprites.emplace_back(worldsrc["layer:bg"], Point<int16_t>(650, 45));
+         sprites.emplace_back(frame, Point<int16_t>(400, 290));
+@@ -76,7 +109,14 @@ namespace jrc
+ 
+     void UIWorldSelect::draw(float alpha) const
+     {
+-        UIElement::draw(alpha);
++        draw_sprites(alpha);
++        if (legacy_ui)
++        {
++            ColorBox(360, 130, Geometry::BLACK, 0.75f).draw(position + Point<int16_t>(220, 220));
++            ColorBox(64, 24, Geometry::WHITE, 0.40f).draw(position + Point<int16_t>(
++                226 + (channelid % 5) * 68, 226 + (channelid / 5) * 28));
++        }
++        draw_buttons(alpha);
+     }
+ 
+     uint8_t UIWorldSelect::get_world_id() const
+diff --git a/src/client/IO/UITypes/UIWorldSelect.h b/src/client/IO/UITypes/UIWorldSelect.h
+index ba2d13e..62bb0b4 100644
+--- a/src/client/IO/UITypes/UIWorldSelect.h
++++ b/src/client/IO/UITypes/UIWorldSelect.h
+@@ -49,6 +49,7 @@ namespace jrc
+ 
+         uint8_t worldid;
+         uint8_t channelid;
++        bool legacy_ui = false;
+     };
+ }
+ 
+diff --git a/src/client/Net/Handlers/LoginHandlers.cpp b/src/client/Net/Handlers/LoginHandlers.cpp
+index eac4c0b..448ab5c 100644
+--- a/src/client/Net/Handlers/LoginHandlers.cpp
++++ b/src/client/Net/Handlers/LoginHandlers.cpp
+@@ -32,6 +32,14 @@
+ 
+ namespace jrc
+ {
++    void CheckPicResultHandler::handle(InPacket& recv) const
++    {
++        recv.read_byte();
++        UI::get().remove(UIElement::SOFTKEYBOARD);
++        UI::get().enable();
++        UI::get().emplace<UILoginNotice>(UILoginNotice::SECOND_PASSWORD_INCORRECT);
++    }
++
+     void LoginResultHandler::handle(InPacket& recv) const
+     {
+         // Remove previous UIs.
+diff --git a/src/client/Net/Handlers/LoginHandlers.h b/src/client/Net/Handlers/LoginHandlers.h
+index 10b121a..faabc48 100644
+--- a/src/client/Net/Handlers/LoginHandlers.h
++++ b/src/client/Net/Handlers/LoginHandlers.h
+@@ -26,6 +26,11 @@ namespace jrc
+         void handle(InPacket& recv) const override;
+     };
+ 
++    class CheckPicResultHandler : public PacketHandler
++    {
++        void handle(InPacket& recv) const override;
++    };
++
+     // Handles the packet that contains information on worlds and channels.
+     class ServerlistHandler : public PacketHandler
+     {
+diff --git a/src/client/Net/PacketSwitch.cpp b/src/client/Net/PacketSwitch.cpp
+index bbcec57..b8d0056 100644
+--- a/src/client/Net/PacketSwitch.cpp
++++ b/src/client/Net/PacketSwitch.cpp
+@@ -53,6 +53,7 @@ namespace jrc
+         // Login 2
+         SELECT_WORLD       = 26,
+         RECOMMENDED_WORLDS = 27,
++        CHECK_PIC_RESULT  = 28,
+ 
+         // Inventory 1
+         MODIFY_INVENTORY = 29,
+@@ -172,6 +173,7 @@ namespace jrc
+ 
+         // Login handlers
+         emplace<LOGIN_RESULT, LoginResultHandler>();
++        emplace<CHECK_PIC_RESULT, CheckPicResultHandler>();
+         emplace<SERVERLIST, ServerlistHandler>();
+         emplace<CHARLIST, CharlistHandler>();
+         emplace<CHARNAME_RESPONSE, CharnameResponseHandler>();

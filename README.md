@@ -28,7 +28,52 @@ Releases only contain the client and the cosmic wz files. The setup/installer is
 
 ## Installation
 
-### Guide
+### macOS: play in a browser
+
+The Mac launcher builds [MapleStory WASM](https://github.com/nmnsnv/maplestory-wasm)
+and connects it to your local Cosmic server. The browser runs the game; the
+Windows executable is not used. Chrome is the tested browser on Apple Silicon.
+
+Install [Homebrew](https://brew.sh), then run once in this repository:
+
+```sh
+./setup-macos.sh
+```
+
+Start `../Cosmic/launch-macos.command`, then double-click
+`launch-macos.command` in this folder, or run it in Terminal. It opens
+<http://127.0.0.1:8000>. Keep the server and client launcher terminals running.
+
+For the bundled test account, log in with **admin / admin**, choose a channel,
+select **Admin**, and click **Start**. Enter PIC **000000** on the onscreen keypad;
+its digits move after each click. Click inside the game to focus the keyboard.
+
+Setup installs the build dependencies, downloads the repository's Git LFS files,
+extracts the missing vanilla WZ data, converts the assets to NX, and compiles the
+browser client using Emscripten 4.0.21. Allow about 20 GB of free space for a fresh
+checkout and setup. Subsequent runs reuse unchanged assets and build outputs.
+All downloaded tools, generated assets, and build output stay in `.local/`.
+Original WZ files are read-only inputs.
+
+The source revisions are pinned in `setup-macos.sh`. Patches in `macos/patches/`
+make the converter work on macOS, add support for the included v83 login and
+channel assets, and fix the PIC prompt and incorrect-PIC response. A newer
+`UI.wz` is not required for this setup. This is an alternative client under
+active development; some menus and gameplay features differ from the Windows
+client. It is not a complete recreation of every original feature.
+
+The web server uses port **8000**, the game WebSocket bridge **8080**, and asset
+streaming **8765**, all bound to `127.0.0.1`. Cosmic's login server must be running
+on port **8484**. Use `stop-macos.command` or Control-C in the client terminal to
+stop the browser services. The Cosmic server and saved characters are separate.
+Diagnostics are in `.local/browser.log` and `.local/asset-*.log`.
+Set `COSMIC_NO_BROWSER=1` to start the services without opening a browser tab.
+
+The original Windows client was also tested with several Wine versions on Apple
+Silicon and failed during initialization. The Mac scripts use the browser client
+because that route can be built from source and tested locally.
+
+### Windows guide
 1. Run _MapleGlobal-v83-setup.exe_ and install in a directory of your choice or use the default location (C:\Nexon\MapleStory)
 2. Remove the following files from the installation directory: 
    - _HShield_ (remove the entire directory)
