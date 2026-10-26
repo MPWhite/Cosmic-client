@@ -103,6 +103,15 @@ account and characters work on desktop and mobile; log out on one device before
 using the other. Keep the Mac connected with its lid open while playing. The
 launcher prevents idle sleep while the browser service runs.
 
+The game renders at the phone's aspect ratio, filling the available screen
+without stretching character artwork. Rotation updates the camera, HUD and tap
+coordinates. Touch controls sit above the status bar and quickslots.
+Use **Full screen** on supported browsers. On iPhone, use **Share → Add to Home
+Screen**, enable **Open as Web App** if shown, and launch that Home Screen icon
+to remove the browser address bar. Close the original game tab before signing
+in from the Home Screen app. The Full screen button also shows these steps when
+the browser cannot enter fullscreen directly.
+
 The mobile client provides touch movement/action buttons and native text entry
 for login, PIC, chat and NPC prompts. Assets load as needed, so the first visit
 can take longer. Current Safari/Chrome is recommended.

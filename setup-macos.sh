@@ -56,12 +56,15 @@ checkout_source "$STATE/wz-converter" https://github.com/ryantpayton/NoLifeWzToN
 checkout_source "$STATE/emsdk" https://github.com/emscripten-core/emsdk.git d7b4130688bfa348392b921ab04015aa15c4f154
 # Later patches overlap earlier hunks. Check the final layer before migrating
 # either a fresh checkout or an existing desktop-only installation.
-if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-mobile.patch" 2>/dev/null; then
-    if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-ui-v83.patch" 2>/dev/null; then
-        apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-v83.patch"
-        apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-ui-v83.patch"
+if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-fullscreen.patch" 2>/dev/null; then
+    if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-mobile.patch" 2>/dev/null; then
+        if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-ui-v83.patch" 2>/dev/null; then
+            apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-v83.patch"
+            apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-ui-v83.patch"
+        fi
+        apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-mobile.patch"
     fi
-    apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-mobile.patch"
+    apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-fullscreen.patch"
 fi
 apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-resident-movement.patch"
 apply_local_patch "$STATE/wz-converter" "$CLIENT_ROOT/macos/patches/wz-converter-macos.patch"

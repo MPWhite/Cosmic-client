@@ -1,0 +1,1314 @@
+diff --git a/src/client/Gameplay/Camera.cpp b/src/client/Gameplay/Camera.cpp
+index fe5384e..fc7e5b3 100644
+--- a/src/client/Gameplay/Camera.cpp
++++ b/src/client/Gameplay/Camera.cpp
+@@ -26,28 +26,38 @@ namespace jrc
+     {
+         x.set(0.0);
+         y.set(0.0);
++        view_width = Constants::viewwidth();
++        view_height = Constants::viewheight();
+     }
+ 
+     void Camera::update(Point<int16_t> position)
+     {
+-        int16_t view_width = Constants::viewwidth();
+-        int16_t view_height = Constants::viewheight();
++        const bool resized = view_width != Constants::viewwidth() ||
++                             view_height != Constants::viewheight();
++        view_width = Constants::viewwidth();
++        view_height = Constants::viewheight();
+ 
+-        double next_x = x.get();
++        double next_x = resized ? view_width / 2.0 - position.x() : x.get();
+         double hdelta = view_width / 2 - position.x() - next_x;
+         if (std::abs(hdelta) >= 5.0)
+         {
+             next_x += hdelta * (12.0 / view_width);
+         }
+ 
+-        double next_y = y.get();
++        double next_y = resized ? view_height / 2.0 - position.y() : y.get();
+         double vdelta = view_height / 2 - position.y() - next_y;
+         if (std::abs(vdelta) >= 5.0)
+         {
+             next_y += vdelta * (12.0 / view_height);
+         }
+ 
+-        if (next_x > hbounds.first() || hbounds.length() < view_width)
++        if (hbounds.length() < view_width)
++        {
++            // A phone viewport can exceed the entire map. Keep its playable
++            // area centered instead of pinning every actor to the upper-left.
++            next_x = (static_cast<double>(hbounds.first()) + hbounds.second() + view_width) / 2.0;
++        }
++        else if (next_x > hbounds.first())
+         {
+             next_x = hbounds.first();
+         }
+@@ -56,7 +66,11 @@ namespace jrc
+             next_x = hbounds.second() + view_width;
+         }
+ 
+-        if (next_y > vbounds.first() || vbounds.length() < view_height)
++        if (vbounds.length() < view_height)
++        {
++            next_y = (static_cast<double>(vbounds.first()) + vbounds.second() + view_height) / 2.0;
++        }
++        else if (next_y > vbounds.first())
+         {
+             next_y = vbounds.first();
+         }
+@@ -65,14 +79,26 @@ namespace jrc
+             next_y = vbounds.second() + view_height;
+         }
+ 
+-        x = next_x;
+-        y = next_y;
++        if (resized)
++        {
++            // Rotation changes the coordinate system immediately. Interpolating
++            // from the previous viewport briefly puts the player off-screen.
++            x.set(next_x);
++            y.set(next_y);
++        }
++        else
++        {
++            x = next_x;
++            y = next_y;
++        }
+     }
+ 
+     void Camera::set_position(Point<int16_t> position)
+     {
+-        x.set(Constants::viewwidth() / 2 - position.x());
+-        y.set(Constants::viewheight() / 2 - position.y());
++        view_width = Constants::viewwidth();
++        view_height = Constants::viewheight();
++        x.set(view_width / 2 - position.x());
++        y.set(view_height / 2 - position.y());
+     }
+ 
+     void Camera::set_view(Range<int16_t> mapwalls, Range<int16_t> mapborders)
+diff --git a/src/client/Gameplay/Camera.h b/src/client/Gameplay/Camera.h
+index 49c646e..92bd7fa 100644
+--- a/src/client/Gameplay/Camera.h
++++ b/src/client/Gameplay/Camera.h
+@@ -48,6 +48,8 @@ namespace jrc
+         // Movement variables.
+         Linear<double> x;
+         Linear<double> y;
++        int16_t view_width;
++        int16_t view_height;
+ 
+         // View limits.
+         Range<int16_t> hbounds;
+diff --git a/src/client/Graphics/Text.cpp b/src/client/Graphics/Text.cpp
+index 43b13be..549e143 100644
+--- a/src/client/Graphics/Text.cpp
++++ b/src/client/Graphics/Text.cpp
+@@ -68,6 +68,14 @@ namespace jrc
+         background = b;
+     }
+ 
++    void Text::set_maxwidth(uint16_t width)
++    {
++        if (maxwidth == width)
++            return;
++        maxwidth = width;
++        reset_layout();
++    }
++
+     void Text::draw(const DrawArgument& args) const
+     {
+         GraphicsGL::get()
+diff --git a/src/client/Graphics/Text.h b/src/client/Graphics/Text.h
+index f2b8b9b..cfb66cf 100644
+--- a/src/client/Graphics/Text.h
++++ b/src/client/Graphics/Text.h
+@@ -120,6 +120,7 @@ namespace jrc
+ 
+         void change_text(const std::string& text);
+         void change_color(Color color);
++        void set_maxwidth(uint16_t width);
+         void set_background(Background background);
+ 
+         bool empty() const;
+diff --git a/src/client/IO/Components/Textfield.h b/src/client/IO/Components/Textfield.h
+index 3d60f23..34a1664 100644
+--- a/src/client/IO/Components/Textfield.h
++++ b/src/client/IO/Components/Textfield.h
+@@ -54,6 +54,7 @@ namespace jrc
+         void set_state(State state);
+         void change_text(const std::string& text);
+         void set_cryptchar(int8_t character);
++        void set_bounds(Rectangle<int16_t> area) { bounds = area; }
+ 
+         void set_enter_callback(std::function<void(std::string)> onreturn);
+         void set_key_callback(KeyAction::Id key, std::function<void(void)> action);
+diff --git a/src/client/IO/UIElement.cpp b/src/client/IO/UIElement.cpp
+index c682b83..847f50a 100644
+--- a/src/client/IO/UIElement.cpp
++++ b/src/client/IO/UIElement.cpp
+@@ -98,8 +98,22 @@ namespace jrc
+         }
+     }
+ 
+-    void UIElement::update_screen(int16_t, int16_t)
++    void UIElement::update_screen(int16_t width, int16_t height)
+     {
++        switch (type)
++        {
++        case LOGIN:
++        case WORLDSELECT:
++        case CHARSELECT:
++        case CHARCREATION:
++            // Login artwork is a fixed scene. Move its artwork and hitboxes
++            // together instead of stretching characters or form controls.
++            position = {static_cast<int16_t>((width - dimension.x()) / 2),
++                        static_cast<int16_t>((height - dimension.y()) / 2)};
++            break;
++        default:
++            break;
++        }
+     }
+ 
+     void UIElement::makeactive()
+diff --git a/src/client/IO/UIStateGame.cpp b/src/client/IO/UIStateGame.cpp
+index e62ccab..d46ab19 100644
+--- a/src/client/IO/UIStateGame.cpp
++++ b/src/client/IO/UIStateGame.cpp
+@@ -145,13 +145,14 @@ namespace jrc
+         for (const auto& type : elementorder)
+         {
+             auto& element = elements[type];
+-            if (element && element->is_active())
++            if (element)
+             {
+                 if (screen_changed)
+                 {
+                     element->update_screen(new_width, new_height);
+                 }
+-                element->update();
++                if (element->is_active())
++                    element->update();
+             }
+         }
+     }
+diff --git a/src/client/IO/UIStateLogin.cpp b/src/client/IO/UIStateLogin.cpp
+index 7f1aa89..4340980 100644
+--- a/src/client/IO/UIStateLogin.cpp
++++ b/src/client/IO/UIStateLogin.cpp
+@@ -21,6 +21,8 @@
+ #include "UITypes/UILogin.h"
+ 
+ #include "../Constants.h"
++#include "../Graphics/Geometry.h"
++#include "nlnx/nx.hpp"
+ 
+ #include <algorithm>
+ 
+@@ -33,11 +35,27 @@ namespace jrc
+         view_width = Constants::viewwidth();
+         view_height = Constants::viewheight();
+ 
++        const auto back = nl::nx::map["Back"]["login.img"]["back"];
++        scene_background = back["11"] ? back["11"] : back["0"];
++
+         emplace<UILogin>();
+     }
+ 
+     void UIStateLogin::draw(float inter, Point<int16_t>) const
+     {
++        if (scene_background.is_valid() && (view_width != 800 || view_height != 600))
++        {
++            // A cover image fills the surrounding screen while the interactive
++            // 800x600 scene remains sharp and consistently positioned.
++            const float scale = std::max(static_cast<float>(view_width) / scene_background.width(),
++                                         static_cast<float>(view_height) / scene_background.height());
++            const auto origin = scene_background.get_origin();
++            const Point<int16_t> anchor{
++                static_cast<int16_t>((view_width - scene_background.width() * scale) / 2 + origin.x() * scale),
++                static_cast<int16_t>((view_height - scene_background.height() * scale) / 2 + origin.y() * scale)};
++            scene_background.draw({anchor, scale, scale});
++            ColorBox(view_width, view_height, Geometry::BLACK, 0.3f).draw({0, 0});
++        }
+         for (auto iter : elements)
+         {
+             UIElement* element = iter.second.get();
+@@ -60,13 +78,14 @@ namespace jrc
+         for (auto iter : elements)
+         {
+             UIElement* element = iter.second.get();
+-            if (element && element->is_active())
++            if (element)
+             {
+                 if (screen_changed)
+                 {
+                     element->update_screen(new_width, new_height);
+                 }
+-                element->update();
++                if (element->is_active())
++                    element->update();
+             }
+         }
+     }
+diff --git a/src/client/IO/UIStateLogin.h b/src/client/IO/UIStateLogin.h
+index 1207726..c5521db 100644
+--- a/src/client/IO/UIStateLogin.h
++++ b/src/client/IO/UIStateLogin.h
+@@ -67,5 +67,6 @@ namespace jrc
+         UIElement::Type cursor_captured;
+         int16_t view_width;
+         int16_t view_height;
++        Texture scene_background;
+     };
+ }
+diff --git a/src/client/IO/UITypes/UICharCreation.cpp b/src/client/IO/UITypes/UICharCreation.cpp
+index b7e7acb..ef13bfd 100644
+--- a/src/client/IO/UITypes/UICharCreation.cpp
++++ b/src/client/IO/UITypes/UICharCreation.cpp
+@@ -434,20 +434,20 @@ namespace jrc
+         {
+             for (int16_t k = 0; sky.width() > 0 && k < 800; k += sky.width())
+             {
+-                sky.draw(Point<int16_t>(k, (400 * i) - 100));
++                sky.draw(position + Point<int16_t>(k, (400 * i) - 100));
+             }
+         }
+ 
+         int16_t cloudx = static_cast<int16_t>(cloudfx) % 800;
+-        cloud.draw(Point<int16_t>(cloudx - cloud.width(), 300));
+-        cloud.draw(Point<int16_t>(cloudx, 300));
+-        cloud.draw(Point<int16_t>(cloudx + cloud.width(), 300));
++        cloud.draw(position + Point<int16_t>(cloudx - cloud.width(), 300));
++        cloud.draw(position + Point<int16_t>(cloudx, 300));
++        cloud.draw(position + Point<int16_t>(cloudx + cloud.width(), 300));
+ 
+         draw_sprites(alpha);
+ 
+         if (!named)
+         {
+-            nameboard.draw(Point<int16_t>(455, 115 ));
++            nameboard.draw(position + Point<int16_t>(455, 115));
+             namechar.draw(position);
+         }
+         else
+@@ -460,19 +460,19 @@ namespace jrc
+ 
+         draw_buttons(alpha);
+ 
+-        newchar.draw({ 360, 348 }, alpha);
++        newchar.draw(position + Point<int16_t>{360, 348}, alpha);
+ 
+         if (named)
+         {
+-            facename.draw(Point<int16_t>(591, 214));
+-            hairname.draw(Point<int16_t>(591, 233));
+-            haircname.draw(Point<int16_t>(591, 252));
+-            bodyname.draw(Point<int16_t>(591, 271));
+-            topname.draw(Point<int16_t>(591, 290));
+-            botname.draw(Point<int16_t>(591, 309));
+-            shoename.draw(Point<int16_t>(591, 328));
+-            wepname.draw(Point<int16_t>(591, 347));
+-            gendername.draw(Point<int16_t>(591, 366));
++            facename.draw(position + Point<int16_t>(591, 214));
++            hairname.draw(position + Point<int16_t>(591, 233));
++            haircname.draw(position + Point<int16_t>(591, 252));
++            bodyname.draw(position + Point<int16_t>(591, 271));
++            topname.draw(position + Point<int16_t>(591, 290));
++            botname.draw(position + Point<int16_t>(591, 309));
++            shoename.draw(position + Point<int16_t>(591, 328));
++            wepname.draw(position + Point<int16_t>(591, 347));
++            gendername.draw(position + Point<int16_t>(591, 366));
+         }
+     }
+ 
+diff --git a/src/client/IO/UITypes/UICharSelect.cpp b/src/client/IO/UITypes/UICharSelect.cpp
+index 91d70a5..d21342e 100644
+--- a/src/client/IO/UITypes/UICharSelect.cpp
++++ b/src/client/IO/UITypes/UICharSelect.cpp
+@@ -159,7 +159,7 @@ namespace jrc
+ 
+         for (uint8_t i = 0; i < charcount_relative; ++i)
+         {
+-            Point<int16_t> charpos = get_char_pos(i);
++            Point<int16_t> charpos = position + get_char_pos(i);
+             uint8_t index = i + page * PAGESIZE;
+             charlooks[index].draw(charpos, alpha);
+             nametags[index].draw(charpos);
+@@ -167,8 +167,8 @@ namespace jrc
+ 
+         if (legacy_ui)
+         {
+-            world_name.draw(selworldpos + Point<int16_t>(101, 13));
+-            world_label.draw(selworldpos + Point<int16_t>(101, 30));
++            world_name.draw(position + selworldpos + Point<int16_t>(101, 13));
++            world_label.draw(position + selworldpos + Point<int16_t>(101, 30));
+         }
+ 
+         if (charcount_relative > 0 && selected_absolute < charcount_absolute)
+@@ -178,17 +178,17 @@ namespace jrc
+             if (!legacy_ui)
+             {
+                 std::string levelstr = std::to_string(stats.stats[Maplestat::LEVEL]);
+-                int16_t lvx = levelset.draw(levelstr, charinfopos + Point<int16_t>(23, -93));
+-                levelset.draw('l', charinfopos + Point<int16_t>(-7 - lvx / 2, -93));
++                int16_t lvx = levelset.draw(levelstr, position + charinfopos + Point<int16_t>(23, -93));
++                levelset.draw('l', position + charinfopos + Point<int16_t>(-7 - lvx / 2, -93));
+             }
+ 
+-            namelabel.draw(charinfopos + Point<int16_t>(legacy_ui ? 46 : 0, -85));
++            namelabel.draw(position + charinfopos + Point<int16_t>(legacy_ui ? 46 : 0, -85));
+ 
+             for (size_t i = 0; i < NUM_LABELS; ++i)
+             {
+                 if ((legacy_ui && i == JOBRANK) || (!legacy_ui && (i == LEVEL || i == FAME)))
+                     continue;
+-                Point<int16_t> labelpos = charinfopos + get_label_pos(i);
++                Point<int16_t> labelpos = position + charinfopos + get_label_pos(i);
+                 infolabels[i].draw(labelpos);
+             }
+         }
+@@ -196,7 +196,7 @@ namespace jrc
+         for (uint8_t i = charcount_relative; i < slots_relative; ++i)
+         {
+             Point<int16_t> position_slot(130 + (120 * (i % 4)), 250 + (200 * (i > 3)));
+-            emptyslot.draw(position_slot, alpha);
++            emptyslot.draw(position + position_slot, alpha);
+         }
+     }
+ 
+diff --git a/src/client/IO/UITypes/UIChatBar.cpp b/src/client/IO/UITypes/UIChatBar.cpp
+index 1911543..bffe7ef 100644
+--- a/src/client/IO/UITypes/UIChatBar.cpp
++++ b/src/client/IO/UITypes/UIChatBar.cpp
+@@ -223,7 +223,7 @@ namespace jrc
+         if (legacy)
+         {
+             targetlabel.draw(position + Point<int16_t>{42, 10});
+-            togglelabel.draw(position + Point<int16_t>{556, 9});
++            togglelabel.draw(position + Point<int16_t>{static_cast<int16_t>(dimension.x() - 10), 9});
+             // An empty, unfocused log should not obscure the playfield.
+             if (chatopen && rowmax < 0 && chatfield.get_state() != Textfield::FOCUSED)
+             {
+@@ -235,7 +235,10 @@ namespace jrc
+ 
+         if (chatopen)
+         {
+-            tapbartop.draw({ legacy ? 0 : position.x() - 576, getchattop() });
++            if (legacy)
++                tapbartop.draw({Point<int16_t>{0, getchattop()}, Point<int16_t>{dimension.x(), 0}});
++            else
++                tapbartop.draw({position.x() - 576, getchattop()});
+             chatbox.draw({ 0, getchattop() + 2 });
+ 
+             int16_t bottom = getchattop() + CHATROWHEIGHT * chatrows + 1;
+@@ -266,7 +269,7 @@ namespace jrc
+         {
+             const auto& line = rowtexts.at(rowmax);
+             const int16_t bottom = legacy ? position.y() : position.y() - CHATYOFFSET;
+-            ColorBox(legacy ? 566 : 502, CHATROWHEIGHT, Geometry::BLACK, 0.72f)
++            ColorBox(legacy ? dimension.x() : 502, CHATROWHEIGHT, Geometry::BLACK, 0.72f)
+                 .draw({0, static_cast<int16_t>(bottom - CHATROWHEIGHT)});
+             line.draw_clipped({4, static_cast<int16_t>(bottom - CHATROWHEIGHT)},
+                 {static_cast<int16_t>(bottom - CHATROWHEIGHT), bottom});
+@@ -287,6 +290,19 @@ namespace jrc
+         position = pos;
+     }
+ 
++    void UIChatbar::set_width(int16_t width)
++    {
++        if (!legacy || width == dimension.x())
++            return;
++        dimension.set_x(width);
++        chatbox.setwidth(width);
++        buttons[BT_OPENCHAT]->set_position({static_cast<int16_t>(width - 16), 7});
++        buttons[BT_CLOSECHAT]->set_position({static_cast<int16_t>(width - 16), 7});
++        chatfield.set_bounds({{89, 9}, {static_cast<int16_t>(width - 21), 27}});
++        for (auto& row : rowtexts)
++            row.second.set_maxwidth(width - 26);
++    }
++
+     Button::State UIChatbar::button_pressed(uint16_t id)
+     {
+         switch (id)
+@@ -314,9 +330,9 @@ namespace jrc
+     {
+         if (legacy)
+         {
+-            const bool entry = Rectangle<int16_t>(position + Point<int16_t>{0, 6}, position + Point<int16_t>{566, 30}).contains(cursorpos);
++            const bool entry = Rectangle<int16_t>(position + Point<int16_t>{0, 6}, position + Point<int16_t>{dimension.x(), 30}).contains(cursorpos);
+             const bool history = chatopen && (rowmax >= 0 || chatfield.get_state() == Textfield::FOCUSED)
+-                && Rectangle<int16_t>({0, getchattop()}, {566, position.y()}).contains(cursorpos);
++                && Rectangle<int16_t>({0, getchattop()}, {dimension.x(), position.y()}).contains(cursorpos);
+             return entry || history;
+         }
+         if (!chatopen)
+@@ -357,7 +373,7 @@ namespace jrc
+         }
+ 
+         auto chattop = Rectangle<int16_t>(
+-            0,  legacy ? 550 : 480,
++            0,  legacy ? dimension.x() - 16 : 480,
+             getchattop(),
+             getchattop() + 6
+             );
+@@ -430,7 +446,7 @@ namespace jrc
+         rowtexts.emplace(
+             std::piecewise_construct,
+             std::forward_as_tuple(rowmax),
+-            std::forward_as_tuple(Text::A12M, Text::LEFT, color, line, legacy ? 540 : 480, false)
++            std::forward_as_tuple(Text::A12M, Text::LEFT, color, line, legacy ? dimension.x() - 26 : 480, false)
+         );
+     }
+ 
+@@ -781,7 +797,8 @@ namespace jrc
+ 
+     Point<int16_t> UIChatbar::slider_position() const
+     {
+-        return {position.x(), static_cast<int16_t>(getchattop() + 2)};
++        return {static_cast<int16_t>(position.x() + (legacy ? dimension.x() - 566 : 0)),
++                static_cast<int16_t>(getchattop() + 2)};
+     }
+ 
+     void UIChatbar::update_slider()
+diff --git a/src/client/IO/UITypes/UIChatBar.h b/src/client/IO/UITypes/UIChatBar.h
+index 5489570..74e3e16 100644
+--- a/src/client/IO/UITypes/UIChatBar.h
++++ b/src/client/IO/UITypes/UIChatBar.h
+@@ -71,6 +71,7 @@ namespace jrc
+         void draw(float inter) const override;
+         void update() override;
+         void set_position(Point<int16_t> pos);
++        void set_width(int16_t width);
+ 
+         bool is_in_range(Point<int16_t> cursorpos) const override;
+         bool remove_cursor(bool clicked, Point<int16_t> cursorpos) override;
+diff --git a/src/client/IO/UITypes/UIStatusBar.cpp b/src/client/IO/UITypes/UIStatusBar.cpp
+index d3bc062..b551060 100644
+--- a/src/client/IO/UITypes/UIStatusBar.cpp
++++ b/src/client/IO/UITypes/UIStatusBar.cpp
+@@ -49,8 +49,8 @@ namespace jrc
+             // than the independently anchored StatusBar2 sprites.
+             nl::node bar = nl::nx::ui["StatusBar.img"];
+             dimension = {800, 71};
+-            sprites.emplace_back(bar["base"]["backgrnd"]);
+-            sprites.emplace_back(bar["base"]["backgrnd2"]);
++            legacy_background = bar["base"]["backgrnd"];
++            legacy_panel = bar["base"]["backgrnd2"];
+             legacy_gauge = bar["gauge"]["bar"];
+             legacy_gray = bar["gauge"]["gray"];
+             legacy_graduation = bar["gauge"]["graduation"];
+@@ -190,6 +190,10 @@ namespace jrc
+ 
+     void UIStatusbar::draw_legacy(float alpha) const
+     {
++        // Only the unlabelled chrome stretches. Gauges, text and action icons
++        // retain their original pixel sizes on wider playfields.
++        legacy_background.draw({position, Point<int16_t>{dimension.x(), 71}});
++        legacy_panel.draw(position);
+         UIElement::draw(alpha);
+         const Point<int16_t> gauge_position = position + Point<int16_t>{218, 37};
+         legacy_gauge.draw(gauge_position);
+@@ -358,6 +362,20 @@ namespace jrc
+         position = legacy
+             ? Point<int16_t>{0, static_cast<int16_t>(Constants::viewheight() - Constants::VIEWYOFFSET - 71)}
+             : Point<int16_t>{POSITION.x(), static_cast<int16_t>(Constants::viewheight() - Constants::VIEWYOFFSET)};
++        if (legacy)
++        {
++            dimension.set_x(Constants::viewwidth());
++            const int16_t extra = dimension.x() - 800;
++            const std::pair<uint16_t, Point<int16_t>> anchors[] = {
++                {BT_STATS, {679, 8}}, {BT_EQUIPS, {619, 8}}, {BT_INVENTORY, {649, 8}},
++                {BT_SKILL, {709, 8}}, {BT_OPTIONS, {739, 8}}, {BT_QUICKOPEN, {769, 8}},
++                {BT_QUICKCLOSE, {769, 8}}, {BT_TRADE, {574, 36}}, {BT_CASHSHOP, {630, 36}},
++                {BT_MENU, {686, 36}}, {BT_CHARACTER, {742, 36}}, {BT_CALLGM, {574, 8}}
++            };
++            for (const auto& anchor : anchors)
++                buttons[anchor.first]->set_position(anchor.second + Point<int16_t>{extra, 0});
++            chatbar.set_width(dimension.x() - 234);
++        }
+         chatbar.set_position(position);
+         for (uint16_t id = BT_MENU_STATS; id < BT_MENU_END; ++id)
+             buttons[id]->set_position(menu_position() - position + Point<int16_t>{2, static_cast<int16_t>(2 + 22 * (id - BT_MENU_STATS))});
+diff --git a/src/client/IO/UITypes/UIStatusBar.h b/src/client/IO/UITypes/UIStatusBar.h
+index 8c55a57..a02339a 100644
+--- a/src/client/IO/UITypes/UIStatusBar.h
++++ b/src/client/IO/UITypes/UIStatusBar.h
+@@ -128,6 +128,8 @@ namespace jrc
+         UIChatbar chatbar;
+         bool legacy = false;
+         bool menu_open = false;
++        Texture legacy_background;
++        Texture legacy_panel;
+         Texture legacy_gauge;
+         Texture legacy_gray;
+         Texture legacy_graduation;
+diff --git a/src/client/IO/Window.cpp b/src/client/IO/Window.cpp
+index d7d4055..2871dc7 100644
+--- a/src/client/IO/Window.cpp
++++ b/src/client/IO/Window.cpp
+@@ -30,6 +30,13 @@
+ 
+ #include <cstdlib>
+ 
++#ifdef MS_PLATFORM_WASM
++extern "C" EMSCRIPTEN_KEEPALIVE void maple_mobile_resize(int width, int height)
++{
++    jrc::Window::get().request_resize(width, height);
++}
++#endif
++
+ namespace jrc
+ {
+     namespace
+@@ -171,17 +178,15 @@ namespace jrc
+         if (width > 0 && height > 0)
+         {
+ #ifdef MS_PLATFORM_WASM
+-            // Browser resizes only change CSS scaling; the game keeps a fixed internal viewport.
+-            Constants::set_viewsize(Constants::VIEWWIDTH, Constants::VIEWHEIGHT);
+-            glViewport(0, 0, Constants::VIEWWIDTH, Constants::VIEWHEIGHT);
++            Window::get().request_resize(width, height);
+ #else
+             Constants::set_viewsize(width, height);
+             glViewport(0, 0, width, height);
+-#endif
+             GraphicsGL::get().set_screensize(
+                 Constants::viewwidth(),
+                 Constants::viewheight()
+             );
++#endif
+         }
+     }
+ 
+@@ -361,6 +366,8 @@ namespace jrc
+     void Window::check_events()
+     {
+ #ifdef MS_PLATFORM_WASM
++        apply_pending_resize();
++
+         int32_t f11state = glfwGetKey(glwnd, GLFW_KEY_F11);
+         if (f11state == GLFW_PRESS && !f11_down)
+         {
+@@ -398,6 +405,61 @@ namespace jrc
+         glfwPollEvents();
+     }
+ 
++#ifdef MS_PLATFORM_WASM
++    void Window::request_resize(int width, int height)
++    {
++        // JS scales the pair together before queuing, retaining the screen's
++        // aspect ratio while bounding framebuffer memory and 16-bit positions.
++        constexpr int MAX_VIEW_DIMENSION = 4096;
++        if (width <= 0 || height <= 0 ||
++            width > MAX_VIEW_DIMENSION || height > MAX_VIEW_DIMENSION)
++            return;
++
++        pending_width = width;
++        pending_height = height;
++    }
++
++    void Window::apply_pending_resize()
++    {
++        if (!glwnd || pending_width == 0 || pending_height == 0)
++            return;
++
++        const int width = pending_width;
++        const int height = pending_height;
++        pending_width = 0;
++        pending_height = 0;
++
++        int framebuffer_width = 0;
++        int framebuffer_height = 0;
++        glfwGetFramebufferSize(glwnd, &framebuffer_width, &framebuffer_height);
++        if (width == Constants::viewwidth() && height == Constants::viewheight() &&
++            width == framebuffer_width && height == framebuffer_height)
++            return;
++
++        // GLFW synchronizes its cursor coordinate scale with the canvas backing
++        // dimensions. Resizing just canvas.width would leave taps misaligned.
++        glfwSetWindowSize(glwnd, width, height);
++        glfwGetFramebufferSize(glwnd, &framebuffer_width, &framebuffer_height);
++        if (framebuffer_width != width || framebuffer_height != height)
++        {
++            // Emscripten's first resize after a fullscreen transition restores
++            // the screen/stored size. Once that transition is recorded, a
++            // second resize applies our logical viewport instead.
++            glfwSetWindowSize(glwnd, width, height);
++        }
++        Constants::set_viewsize(width, height);
++        glViewport(0, 0, width, height);
++        GraphicsGL::get().set_screensize(width, height);
++
++        // Emscripten removes inline CSS dimensions when it updates the canvas.
++        // Restore the browser layout after the backing framebuffer is ready.
++        EM_ASM({
++            if (window.MapleWasmUI && window.MapleWasmUI.applyScale)
++                window.MapleWasmUI.applyScale();
++        });
++    }
++#endif
++
+     void Window::begin() const
+     {
+         GraphicsGL::get().clearscene();
+diff --git a/src/client/IO/Window.h b/src/client/IO/Window.h
+index b39b935..8784630 100644
+--- a/src/client/IO/Window.h
++++ b/src/client/IO/Window.h
+@@ -43,12 +43,24 @@ namespace jrc
+         void fadeout(float step, std::function<void()> fadeprocedure);
+         void check_events();
+ 
++#ifdef MS_PLATFORM_WASM
++        // Browser callbacks may run while asset loading has suspended WASM.
++        // Defer all renderer/window changes to the next game update.
++        void request_resize(int width, int height);
++#endif
++
+         void setclipboard(const std::string& text) const;
+         std::string getclipboard() const;
+ 
+     private:
+         void updateopc();
+ 
++#ifdef MS_PLATFORM_WASM
++        void apply_pending_resize();
++        int pending_width = 0;
++        int pending_height = 0;
++#endif
++
+         GLFWwindow* glwnd;
+         GLFWwindow* context;
+         bool fullscreen;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 6e80d2f..e8840ef 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -70,6 +70,7 @@ add_library(test_core STATIC
+     "${CLIENT}/Character/Job.cpp"
+     "${CLIENT}/IO/UIWindow.cpp"
+     "${CLIENT}/IO/Components/NpcMenu.cpp"
++    "${CLIENT}/Gameplay/Camera.cpp"
+ )
+ target_link_libraries(test_core PUBLIC test_options)
+ 
+@@ -93,6 +94,7 @@ client_test(job_requirements_test unit)
+ client_test(npc_menu_test unit)
+ client_test(npc_packet_test unit)
+ client_test(login_inventory_layout_test unit)
++client_test(viewport_camera_test unit)
+ 
+ if(TEST_ASSETS)
+     foreach(asset Character Etc Item Npc Quest String UI UI_83)
+diff --git a/tests/test_mobile_controls.py b/tests/test_mobile_controls.py
+index c9ca452..5adeefb 100644
+--- a/tests/test_mobile_controls.py
++++ b/tests/test_mobile_controls.py
+@@ -54,6 +54,21 @@ class MobileControlsTest(unittest.TestCase):
+         box = self.page.locator(selector).bounding_box()
+         return {"x": box["x"] + box["width"] / 2, "y": box["y"] + box["height"] / 2}
+ 
++    def load_viewport(self, page):
++        page.evaluate("""() => {
++            const container = document.createElement('div');
++            container.id = 'container';
++            container.append(document.getElementById('canvas'));
++            document.body.append(container);
++            const status = document.createElement('div');
++            status.id = 'connection-status';
++            status.hidden = true;
++            status.innerHTML = '<p id="connection-message"></p><button id="reconnect"></button>';
++            document.body.append(status);
++        }""")
++        page.add_style_tag(content="body {margin:0;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center} #canvas {display:block}")
++        page.add_script_tag(path=str(WEB / "game-viewport.js"))
++
+     def test_multitouch_actions_release_on_cancel(self):
+         session = self.context.new_cdp_session(self.page)
+         right = dict(self.center('[data-action="61"]'), id=1)
+@@ -134,6 +149,67 @@ class MobileControlsTest(unittest.TestCase):
+         self.page.evaluate("MapleMobile.commandCompleted(false)")
+         self.assertFalse(self.page.locator("#mobile-editor").is_visible())
+ 
++    def test_borderless_viewport_queues_aspect_matched_resize_once(self):
++        self.load_viewport(self.page)
++        self.assertEqual(self.calls()[-1], ["maple_mobile_resize", 1298, 600])
++        # Resize requests leave the backing buffer to the C++ game loop.
++        self.assertEqual(self.page.evaluate("[canvas.width, canvas.height]"), [800, 600])
++        self.page.evaluate("canvas.width = 1298; canvas.height = 600")
++        count = len(self.calls())
++        self.page.evaluate("MapleWasmUI.applyScale(); MapleWasmUI.applyScale()")
++        self.assertEqual(len(self.calls()), count)
++        box = self.page.locator("#canvas").bounding_box()
++        self.assertEqual(box, {"x": 0, "y": 0, "width": 844, "height": 390})
++        self.page.set_viewport_size({"width": 390, "height": 844})
++        self.page.wait_for_function("calls.some(call => call[0] === 'maple_mobile_resize' && call[1] === 800)")
++        self.assertEqual(self.calls()[-1], ["maple_mobile_resize", 800, 1731])
++        box = self.page.locator("#canvas").bounding_box()
++        self.assertEqual(box, {"x": 0, "y": 0, "width": 390, "height": 844})
++
++    def test_startup_or_fullscreen_backing_reset_requeues_resize(self):
++        self.load_viewport(self.page)
++        count = len(self.calls())
++        self.page.evaluate("canvas.width = 800; canvas.height = 600; MapleWasmUI.applyScale()")
++        self.assertEqual(self.calls()[-1], ["maple_mobile_resize", 1298, 600])
++        self.assertGreater(len(self.calls()), count)
++        count = len(self.calls())
++        self.page.evaluate("canvas.width = 1298; canvas.height = 600; document.dispatchEvent(new Event('fullscreenchange'))")
++        self.assertEqual(self.calls()[-1], ["maple_mobile_resize", 1298, 600])
++        self.assertGreater(len(self.calls()), count)
++
++    def test_controls_clear_scaled_hud_and_quickslots(self):
++        self.load_viewport(self.page)
++        dpad = self.page.locator("#mobile-dpad").bounding_box()
++        actions = self.page.locator("#mobile-actions").bounding_box()
++        self.assertLessEqual(dpad["y"] + dpad["height"], 390 - 71 * 390 / 600)
++        self.assertLessEqual(actions["y"] + actions["height"], 390 - 146 * 390 / 600)
++
++    def test_extreme_keyboard_aspect_is_uniformly_clamped(self):
++        self.load_viewport(self.page)
++        size = self.page.evaluate("MapleWasmUI.gameSize(932, 100)")
++        self.assertEqual(size["width"], 4096)
++        self.assertLessEqual(size["height"], 4096)
++        self.assertAlmostEqual(size["width"] / size["height"], 9.32, delta=0.02)
++
++    def test_unsupported_fullscreen_explains_home_screen_mode(self):
++        self.page.evaluate("Object.defineProperty(document, 'fullscreenEnabled', {value: false})")
++        self.page.locator("#mobile-fullscreen").tap()
++        self.assertTrue(self.page.locator("#mobile-screen-help").is_visible())
++        self.assertIn("Home Screen", self.page.locator("#mobile-screen-instructions").inner_text())
++        self.page.locator("#mobile-screen-close").tap()
++        self.assertFalse(self.page.locator("#mobile-screen-help").is_visible())
++
++    def test_fullscreen_request_targets_entire_ui_not_canvas(self):
++        self.page.evaluate("""() => {
++            Object.defineProperty(document, 'fullscreenEnabled', {value: true});
++            document.documentElement.requestFullscreen = function (options) {
++                window.fullscreenRequest = [this === document.documentElement, options.navigationUI];
++                return Promise.resolve();
++            };
++        }""")
++        self.page.locator("#mobile-fullscreen").tap()
++        self.assertEqual(self.page.evaluate("fullscreenRequest"), [True, "hide"])
++
+     def test_desktop_unchanged(self):
+         context = self.browser.new_context(viewport={"width": 1200, "height": 800})
+         try:
+diff --git a/tests/viewport_camera_test.cpp b/tests/viewport_camera_test.cpp
+new file mode 100644
+index 0000000..fefa707
+--- /dev/null
++++ b/tests/viewport_camera_test.cpp
+@@ -0,0 +1,69 @@
++#include <doctest/doctest.h>
++
++#include "client/Constants.h"
++#include "client/Gameplay/Camera.h"
++
++namespace
++{
++    struct RestoreViewport
++    {
++        ~RestoreViewport()
++        {
++            jrc::Constants::set_viewsize(jrc::Constants::VIEWWIDTH, jrc::Constants::VIEWHEIGHT);
++        }
++    };
++}
++
++TEST_CASE("Camera rotation centers the player immediately without interpolating old screen coordinates")
++{
++    RestoreViewport restore;
++    jrc::Constants::set_viewsize(800, 600);
++    jrc::Camera camera;
++    camera.set_view({-3000, 3000}, {-3000, 3000});
++    camera.set_position({100, 200});
++    camera.update({100, 200});
++
++    for (const auto size : {jrc::Point<int16_t>(1400, 600), jrc::Point<int16_t>(800, 1600), jrc::Point<int16_t>(800, 600)})
++    {
++        jrc::Constants::set_viewsize(size.x(), size.y());
++        camera.update({100, 200});
++        const auto expected = jrc::Point<int16_t>(size.x() / 2 - 100, size.y() / 2 - 200);
++        CHECK(camera.position() == expected);
++        CHECK(camera.position(0.0f) == expected);
++        CHECK(camera.position(0.5f) == expected);
++    }
++}
++
++TEST_CASE("Camera centers maps smaller than an expanded viewport")
++{
++    RestoreViewport restore;
++    jrc::Constants::set_viewsize(800, 600);
++    jrc::Camera camera;
++    camera.set_view({100, 900}, {200, 800});
++    camera.set_position({500, 500});
++
++    jrc::Constants::set_viewsize(1400, 1600);
++    camera.update({500, 500});
++    CHECK(camera.position() == jrc::Point<int16_t>(200, 300));
++    CHECK(camera.position() + jrc::Point<int16_t>(500, 500) == jrc::Point<int16_t>(700, 800));
++
++    // Walking to the edge of a small map must not pull it out of the center.
++    camera.update({100, 200});
++    CHECK(camera.position() == jrc::Point<int16_t>(200, 300));
++}
++
++TEST_CASE("An expanded camera still clamps to both edges of a large map")
++{
++    RestoreViewport restore;
++    jrc::Constants::set_viewsize(1400, 600);
++    jrc::Camera camera;
++    camera.set_view({0, 3000}, {0, 2000});
++
++    camera.set_position({0, 0});
++    camera.update({0, 0});
++    CHECK(camera.position() == jrc::Point<int16_t>(0, 0));
++
++    camera.set_position({3000, 2000});
++    camera.update({3000, 2000});
++    CHECK(camera.position() == jrc::Point<int16_t>(-1600, -1400));
++}
+diff --git a/web/game-viewport.js b/web/game-viewport.js
+new file mode 100644
+index 0000000..089cd52
+--- /dev/null
++++ b/web/game-viewport.js
+@@ -0,0 +1,79 @@
++(function () {
++    'use strict';
++    const BASE_WIDTH = 800;
++    const BASE_HEIGHT = 600;
++    const MAX_AXIS = 4096;
++    const canvas = document.getElementById('canvas');
++
++    function gameSize(width, height) {
++        const ratio = width / height;
++        let gameWidth = Math.max(BASE_WIDTH, BASE_HEIGHT * ratio);
++        let gameHeight = Math.max(BASE_HEIGHT, BASE_WIDTH / ratio);
++        const reduction = Math.min(1, MAX_AXIS / Math.max(gameWidth, gameHeight));
++        gameWidth *= reduction;
++        gameHeight *= reduction;
++        return { width: Math.max(1, Math.round(gameWidth)), height: Math.max(1, Math.round(gameHeight)) };
++    }
++
++    function fitCanvas() {
++        if (!canvas) return;
++        const mobile = window.MapleMobile && window.MapleMobile.enabled;
++        const viewport = mobile && window.visualViewport;
++        const viewWidth = Math.max(1, viewport ? viewport.width : window.innerWidth);
++        const viewHeight = Math.max(1, viewport ? viewport.height : window.innerHeight);
++        if (mobile) {
++            const size = gameSize(viewWidth, viewHeight);
++            // The C++ main loop applies the queued framebuffer/camera resize.
++            // Changing it directly from a DOM event can interrupt Asyncify.
++            window.MapleMobile.resize(size.width, size.height);
++            canvas.style.width = `${viewWidth}px`;
++            canvas.style.height = `${viewHeight}px`;
++            document.documentElement.style.setProperty('--mobile-width', `${viewWidth}px`);
++            document.documentElement.style.setProperty('--mobile-height', `${viewHeight}px`);
++            document.documentElement.style.setProperty('--mobile-top', `${viewport ? viewport.offsetTop : 0}px`);
++            document.documentElement.style.setProperty('--mobile-left', `${viewport ? viewport.offsetLeft : 0}px`);
++            document.documentElement.style.setProperty('--game-hud-height', `${71 * viewHeight / size.height}px`);
++            document.documentElement.style.setProperty('--game-quickslot-height', `${75 * viewHeight / size.height}px`);
++        } else {
++            const scale = Math.min(viewWidth / BASE_WIDTH, viewHeight / BASE_HEIGHT);
++            canvas.style.width = `${Math.floor(BASE_WIDTH * scale)}px`;
++            canvas.style.height = `${Math.floor(BASE_HEIGHT * scale)}px`;
++        }
++    }
++
++    function showConnectionStatus(message, label) {
++        if (window.MapleMobile) window.MapleMobile.releaseAll();
++        document.getElementById('connection-message').textContent = message;
++        const button = document.getElementById('reconnect');
++        button.textContent = label;
++        document.getElementById('connection-status').hidden = false;
++        button.focus();
++    }
++
++    window.MapleWasmUI = {
++        applyScale: fitCanvas,
++        gameSize,
++        showStopped: function (disconnected) {
++            showConnectionStatus(disconnected
++                ? 'The connection to the server closed.' : 'The game has closed.',
++                disconnected ? 'Reconnect' : 'Play again');
++        },
++        showStartupError: function () {
++            showConnectionStatus('The game could not start. Check that the server is running, then try again.',
++                'Try again');
++        }
++    };
++
++    // Initial setup happens before WASM is loaded; later resizes belong to C++.
++    canvas.width = BASE_WIDTH;
++    canvas.height = BASE_HEIGHT;
++    document.getElementById('reconnect').addEventListener('click', () => window.location.reload());
++    window.addEventListener('resize', fitCanvas);
++    document.addEventListener('fullscreenchange', fitCanvas);
++    document.addEventListener('webkitfullscreenchange', fitCanvas);
++    if (window.visualViewport) {
++        window.visualViewport.addEventListener('resize', fitCanvas);
++        window.visualViewport.addEventListener('scroll', fitCanvas);
++    }
++    fitCanvas();
++})();
+diff --git a/web/index.html b/web/index.html
+index ce18b9d..156f137 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -4,7 +4,12 @@
+ <head>
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
++    <meta name="theme-color" content="#152a42">
++    <meta name="apple-mobile-web-app-capable" content="yes">
++    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
++    <meta name="apple-mobile-web-app-title" content="MapleStory">
+     <title>MapleStory WASM Client</title>
++    <link rel="manifest" href="/web/manifest.webmanifest">
+     <link rel="stylesheet" href="/web/mobile-controls.css">
+     <style>
+         body {
+@@ -64,86 +69,8 @@
+         <section><p id="connection-message"></p><button type="button" id="reconnect">Reconnect</button></section>
+     </div>
+     <script src="/web/mobile-controls.js"></script>
++    <script src="/web/game-viewport.js"></script>
+     <script>
+-        (function () {
+-            const GAME_WIDTH = 800;
+-            const GAME_HEIGHT = 600;
+-
+-            function syncCanvasResolution(canvas) {
+-                if (canvas.width === GAME_WIDTH && canvas.height === GAME_HEIGHT) {
+-                    return;
+-                }
+-
+-                if (typeof Module !== 'undefined' && typeof Module.setCanvasSize === 'function') {
+-                    Module.setCanvasSize(GAME_WIDTH, GAME_HEIGHT);
+-                } else {
+-                    canvas.width = GAME_WIDTH;
+-                    canvas.height = GAME_HEIGHT;
+-                }
+-            }
+-
+-            function getFittedCanvasSize(viewW, viewH) {
+-                if (viewW * GAME_HEIGHT <= viewH * GAME_WIDTH) {
+-                    const width = Math.max(1, Math.floor(viewW));
+-                    return {
+-                        width,
+-                        height: Math.max(1, Math.floor(width * GAME_HEIGHT / GAME_WIDTH))
+-                    };
+-                }
+-
+-                const height = Math.max(1, Math.floor(viewH));
+-                return {
+-                    width: Math.max(1, Math.floor(height * GAME_WIDTH / GAME_HEIGHT)),
+-                    height
+-                };
+-            }
+-
+-            function fitCanvas() {
+-                const canvas = document.getElementById('canvas');
+-                if (!canvas) {
+-                    return;
+-                }
+-
+-                // Keep the render surface fixed and only scale it with CSS.
+-                syncCanvasResolution(canvas);
+-
+-                const mobileViewport = window.MapleMobile && window.MapleMobile.enabled && window.visualViewport;
+-                const { width, height } = getFittedCanvasSize(
+-                    mobileViewport ? mobileViewport.width : window.innerWidth,
+-                    mobileViewport ? mobileViewport.height : window.innerHeight);
+-
+-                canvas.style.width = width + 'px';
+-                canvas.style.height = height + 'px';
+-            }
+-
+-            function showConnectionStatus(message, label) {
+-                if (window.MapleMobile) window.MapleMobile.releaseAll();
+-                document.getElementById('connection-message').textContent = message;
+-                const button = document.getElementById('reconnect');
+-                button.textContent = label;
+-                document.getElementById('connection-status').hidden = false;
+-                button.focus();
+-            }
+-
+-            window.MapleWasmUI = {
+-                applyScale: fitCanvas,
+-                showStopped: function (disconnected) {
+-                    showConnectionStatus(disconnected
+-                        ? 'The connection to the server closed.' : 'The game has closed.',
+-                        disconnected ? 'Reconnect' : 'Play again');
+-                },
+-                showStartupError: function () {
+-                    showConnectionStatus('The game could not start. Check that the server is running, then try again.',
+-                        'Try again');
+-                }
+-            };
+-
+-            document.getElementById('reconnect').addEventListener('click', () => window.location.reload());
+-            window.addEventListener('resize', fitCanvas);
+-            document.addEventListener('fullscreenchange', fitCanvas);
+-            fitCanvas();
+-        })();
+-
+         Module = {
+             canvas: (function () {
+                 let canvas = document.getElementById('canvas');
+diff --git a/web/manifest.webmanifest b/web/manifest.webmanifest
+new file mode 100644
+index 0000000..1be6868
+--- /dev/null
++++ b/web/manifest.webmanifest
+@@ -0,0 +1,11 @@
++{
++    "id": "/",
++    "name": "MapleStory",
++    "short_name": "MapleStory",
++    "start_url": "/",
++    "scope": "/",
++    "display": "standalone",
++    "display_override": ["fullscreen", "standalone"],
++    "background_color": "#152a42",
++    "theme_color": "#152a42"
++}
+diff --git a/web/mobile-controls.css b/web/mobile-controls.css
+index 438c850..61db636 100644
+--- a/web/mobile-controls.css
++++ b/web/mobile-controls.css
+@@ -1,8 +1,13 @@
+ #mobile-ui { display: none; }
+ body.mobile-game { touch-action: none; height: var(--mobile-height, 100dvh); }
+ body.mobile-game #canvas { touch-action: none; }
++body.mobile-game #container {
++    position: fixed; display: block; left: var(--mobile-left, 0px); top: var(--mobile-top, 0px);
++    width: var(--mobile-width, 100vw); height: var(--mobile-height, 100dvh);
++}
+ body.mobile-game #mobile-ui {
+-    display: block; position: fixed; inset: 0; height: var(--mobile-height, 100dvh);
++    display: block; position: fixed; left: var(--mobile-left, 0px); top: var(--mobile-top, 0px);
++    width: var(--mobile-width, 100vw); height: var(--mobile-height, 100dvh);
+     z-index: 5; pointer-events: none; user-select: none; -webkit-user-select: none;
+     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+     box-sizing: border-box; font-size: 12px;
+@@ -17,13 +22,15 @@ body.mobile-game #mobile-ui {
+ #mobile-ui button:disabled { opacity: .4; }
+ #mobile-toolbar {
+     position: absolute; top: max(5px, env(safe-area-inset-top)); left: max(5px, env(safe-area-inset-left));
+-    right: max(5px, env(safe-area-inset-right)); display: flex; gap: 5px; flex-wrap: wrap;
++    right: max(5px, env(safe-area-inset-right)); display: flex; gap: 5px; flex-wrap: wrap; justify-content: center;
+ }
+ #mobile-toolbar button { min-height: 34px; padding: 5px 9px; }
+ #mobile-toolbar .mobile-game-only { display: none; }
+ #mobile-ui.in-game #mobile-toolbar .mobile-game-only { display: block; }
+-#mobile-keyboard { margin-left: auto; }
+-#mobile-dpad, #mobile-actions { display: none; position: absolute; bottom: max(12px, env(safe-area-inset-bottom)); gap: 5px; }
++#mobile-dpad, #mobile-actions {
++    display: none; position: absolute; gap: 5px;
++    bottom: calc(var(--game-hud-height, 0px) + max(12px, env(safe-area-inset-bottom)));
++}
+ #mobile-ui.in-game #mobile-dpad, #mobile-ui.in-game #mobile-actions { display: grid; }
+ #mobile-dpad { left: max(8px, env(safe-area-inset-left)); grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); }
+ #mobile-dpad button { font-size: 23px; padding: 0; }
+@@ -31,7 +38,10 @@ body.mobile-game #mobile-ui {
+ #mobile-dpad [data-action="60"] { grid-column: 1; grid-row: 2; }
+ #mobile-dpad [data-action="61"] { grid-column: 3; grid-row: 2; }
+ #mobile-dpad [data-action="63"] { grid-column: 2; grid-row: 3; }
+-#mobile-actions { right: max(8px, env(safe-area-inset-right)); grid-template-columns: repeat(2, 57px); grid-template-rows: repeat(2, 55px); }
++#mobile-actions {
++    right: max(8px, env(safe-area-inset-right)); grid-template-columns: repeat(2, 57px); grid-template-rows: repeat(2, 55px);
++    bottom: calc(var(--game-hud-height, 0px) + var(--game-quickslot-height, 0px) + max(12px, env(safe-area-inset-bottom)));
++}
+ #mobile-actions [data-action="52"] { background: #a64b21cc; }
+ #mobile-actions [data-action="53"] { background: #236e9dcc; }
+ #mobile-rotate {
+@@ -52,8 +62,28 @@ body.mobile-game #mobile-ui {
+ }
+ #mobile-ui.editing #mobile-dpad, #mobile-ui.editing #mobile-actions { display: none; }
+ #mobile-ui.editing #mobile-rotate { display: none; }
++#mobile-ui.in-game #mobile-rotate { display: none; }
++#mobile-screen-help {
++    position: absolute; inset: 0; z-index: 2; pointer-events: auto; background: #071321c9;
++    display: flex; align-items: center; justify-content: center; padding: 18px;
++}
++#mobile-screen-help[hidden] { display: none; }
++#mobile-screen-help section {
++    max-width: 420px; padding: 20px; border-radius: 14px; color: #182c40;
++    background: #fff5df; border: 2px solid #e5b85b; font: 15px/1.5 system-ui;
++}
++#mobile-screen-help h2 { margin: 0 0 10px; font-size: 20px; }
++#mobile-screen-help p { margin: 10px 0; }
++#mobile-screen-help button { background: #24658e; min-height: 44px; }
++@media (orientation: landscape) {
++    #mobile-ui.in-game:not(.editing) #mobile-toolbar {
++        top: auto; bottom: calc(var(--game-hud-height, 0px) + max(12px, env(safe-area-inset-bottom)));
++        left: calc(165px + env(safe-area-inset-left)); right: calc(138px + env(safe-area-inset-right));
++    }
++    #mobile-ui.editing #mobile-toolbar .mobile-game-only { display: none; }
++}
+ @media (orientation: portrait) {
+-    #mobile-rotate { display: block; }
++    #mobile-rotate { display: block; top: calc(max(5px, env(safe-area-inset-top)) + 82px); }
+     #mobile-toolbar button { padding: 5px 7px; }
+     #mobile-editor { flex-wrap: wrap; }
+     #mobile-input { flex-basis: 100%; }
+diff --git a/web/mobile-controls.js b/web/mobile-controls.js
+index 7e2872c..47d9e9d 100644
+--- a/web/mobile-controls.js
++++ b/web/mobile-controls.js
+@@ -9,6 +9,8 @@
+     let deferredCommand = null;
+     let textRevision = 0;
+     let pendingRevision = 0;
++    let requestedWidth = 0;
++    let requestedHeight = 0;
+     const pointers = new Map();
+     const counts = new Map();
+     const ui = document.createElement('div');
+@@ -16,6 +18,7 @@
+     ui.innerHTML = `
+         <div id="mobile-toolbar">
+             <button type="button" data-command="2" aria-label="Close dialog or open menu">Back</button>
++            <button type="button" id="mobile-fullscreen">Full screen</button>
+             <button type="button" class="mobile-game-only" data-command="3">Items</button>
+             <button type="button" class="mobile-game-only" data-command="4">Skills</button>
+             <button type="button" class="mobile-game-only" data-command="6">Quests</button>
+@@ -40,11 +43,22 @@
+             <button type="button" id="mobile-next">Next</button>
+             <button type="submit">Done</button>
+             <button type="button" id="mobile-hide" aria-label="Hide keyboard">Hide</button>
+-        </form>`;
++        </form>
++        <div id="mobile-screen-help" hidden role="dialog" aria-modal="true" aria-labelledby="mobile-screen-title">
++            <section>
++                <h2 id="mobile-screen-title">Play without browser bars</h2>
++                <p id="mobile-screen-instructions"></p>
++                <p id="mobile-screen-fallback"></p>
++                <button type="button" id="mobile-screen-close">Got it</button>
++            </section>
++        </div>`;
+     document.body.appendChild(ui);
+     const input = document.getElementById('mobile-input');
+     const editor = document.getElementById('mobile-editor');
+     const keyboard = document.getElementById('mobile-keyboard');
++    const fullscreen = document.getElementById('mobile-fullscreen');
++    const screenHelp = document.getElementById('mobile-screen-help');
++    const closeHelp = document.getElementById('mobile-screen-close');
+ 
+     function call(name, types, args) {
+         if (!enabled || !ready || typeof Module === 'undefined' || typeof Module.ccall !== 'function') return;
+@@ -101,15 +115,55 @@
+     }
+     function updateViewport() {
+         if (!enabled) return;
+-        const viewport = window.visualViewport;
+-        const height = viewport ? viewport.height : window.innerHeight;
+-        document.documentElement.style.setProperty('--mobile-height', `${Math.floor(height)}px`);
+         if (window.MapleWasmUI) window.MapleWasmUI.applyScale();
+     }
++    function fullscreenElement() {
++        return document.fullscreenElement || document.webkitFullscreenElement;
++    }
++    function updateFullscreenButton() {
++        const standalone = window.matchMedia('(display-mode: standalone)').matches
++            || window.matchMedia('(display-mode: fullscreen)').matches || navigator.standalone;
++        fullscreen.hidden = !!standalone && !fullscreenElement();
++        fullscreen.textContent = fullscreenElement() ? 'Exit full screen' : 'Full screen';
++        updateViewport();
++    }
++    function fullscreenChanged() {
++        // Emscripten may replace the backing dimensions on fullscreen changes,
++        // even when the desired logical size stayed the same.
++        requestedWidth = 0;
++        requestedHeight = 0;
++        updateFullscreenButton();
++    }
++    function showScreenHelp() {
++        releaseAll();
++        setEditing(false);
++        const apple = /iPhone|iPad|iPod/.test(navigator.userAgent)
++            || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
++        document.getElementById('mobile-screen-instructions').textContent = apple
++            ? 'Tap Share → Add to Home Screen. Turn on Open as Web App if offered, then tap Add. Open MapleStory from your Home Screen.'
++            : 'Open your browser menu and choose Install app or Add to Home Screen. Then launch MapleStory from your Home Screen.';
++        document.getElementById('mobile-screen-fallback').textContent = apple
++            ? 'If Add to Home Screen is missing in Chrome, open this link in Safari and use its Share menu.'
++            : 'The game fills the available screen here; the Home Screen app can also hide the browser bars.';
++        screenHelp.hidden = false;
++        closeHelp.focus();
++    }
++    function hideScreenHelp() {
++        screenHelp.hidden = true;
++        fullscreen.focus();
++    }
+ 
+     window.MapleMobile = {
+         enabled,
+-        ready: function () { ready = true; },
++        ready: function () { ready = true; updateViewport(); },
++        resize: function (width, height) {
++            const canvas = document.getElementById('canvas');
++            if (!enabled || !ready || (width === requestedWidth && height === requestedHeight
++                && canvas && canvas.width === width && canvas.height === height)) return;
++            requestedWidth = width;
++            requestedHeight = height;
++            call('maple_mobile_resize', ['number', 'number'], [width, height]);
++        },
+         isEditing: function () { return enabled && editing; },
+         releaseAll,
+         acknowledgeText: function (token, revision, value) {
+@@ -166,6 +220,27 @@
+     };
+     if (!enabled) return;
+     document.body.classList.add('mobile-game');
++    fullscreen.addEventListener('click', async () => {
++        releaseAll();
++        try {
++            if (fullscreenElement()) {
++                const exit = document.exitFullscreen || document.webkitExitFullscreen;
++                if (exit) await exit.call(document);
++            } else {
++                const enter = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
++                if (!enter || document.fullscreenEnabled === false) { showScreenHelp(); return; }
++                await enter.call(document.documentElement, { navigationUI: 'hide' });
++            }
++            updateFullscreenButton();
++        } catch (_) {
++            showScreenHelp();
++        }
++    });
++    closeHelp.addEventListener('click', hideScreenHelp);
++    document.addEventListener('fullscreenchange', fullscreenChanged);
++    document.addEventListener('webkitfullscreenchange', fullscreenChanged);
++    window.matchMedia('(display-mode: standalone)').addEventListener('change', updateFullscreenButton);
++    updateFullscreenButton();
+ 
+     for (const button of ui.querySelectorAll('[data-action]')) {
+         button.addEventListener('pointerdown', event => {
+@@ -216,6 +291,12 @@
+     // and Backspace/Tab lose their normal browser behavior.
+     for (const type of ['keydown', 'keyup', 'keypress']) {
+         window.addEventListener(type, event => {
++            if (!screenHelp.hidden) {
++                event.stopImmediatePropagation();
++                if (type === 'keydown' && event.key === 'Escape') hideScreenHelp();
++                if (event.key === 'Tab' || event.key === 'Escape') event.preventDefault();
++                return;
++            }
+             if (event.target !== input) return;
+             event.stopImmediatePropagation();
+             if (type === 'keydown' && event.key === 'Enter') {
+@@ -234,6 +315,5 @@
+     window.addEventListener('pagehide', releaseAll);
+     document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+     window.addEventListener('resize', () => { releaseAll(); updateViewport(); });
+-    if (window.visualViewport) window.visualViewport.addEventListener('resize', updateViewport);
+     updateViewport();
+ })();

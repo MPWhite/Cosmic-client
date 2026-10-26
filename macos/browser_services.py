@@ -62,7 +62,7 @@ async def serve():
             files = {'/': CHECKOUT / 'web/index.html',
                      '/web/index.html': CHECKOUT / 'web/index.html',
                      '/web/config.json': CHECKOUT / 'web/config.json'}
-            for name in ('mobile-controls.js', 'mobile-controls.css'):
+            for name in ('mobile-controls.js', 'mobile-controls.css', 'game-viewport.js', 'manifest.webmanifest'):
                 files['/web/' + name] = CHECKOUT / 'web' / name
             for name in ('JourneyClient.js', 'JourneyClient.wasm', 'JourneyClient.wasm.map'):
                 files['/build/' + name] = CHECKOUT / 'build' / name
