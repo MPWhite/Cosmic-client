@@ -1,0 +1,107 @@
+diff --git a/src/client/Character/OtherChar.cpp b/src/client/Character/OtherChar.cpp
+index a795b92..839c7a9 100644
+--- a/src/client/Character/OtherChar.cpp
++++ b/src/client/Character/OtherChar.cpp
+@@ -19,6 +19,8 @@
+ 
+ #include "../Constants.h"
+ 
++#include <algorithm>
++
+ namespace jrc
+ {
+     OtherChar::OtherChar(int32_t id, const CharLook& lk, uint8_t lvl,
+@@ -39,31 +41,26 @@ namespace jrc
+ 
+     int8_t OtherChar::update(const Physics& physics)
+     {
+-        if (timer > 1)
+-        {
+-            timer--;
+-        }
+-        else if (timer == 1)
+-        {
+-            if (!movements.empty())
+-            {
+-                lastmove = movements.front();
+-                movements.pop();
+-            }
+-            else
+-            {
+-                timer = 0;
+-            }
+-        }
+-
+         if (!attacking)
+         {
+             uint8_t laststate = lastmove.newstate;
+             set_state(laststate);
+         }
+ 
+-        phobj.hspeed = lastmove.xpos - phobj.crnt_x();
+-        phobj.vspeed = lastmove.ypos - phobj.crnt_y();
++        // Blend toward the newest endpoint over its reported duration. Keeping
++        // one endpoint prevents network bursts from creating a growing backlog.
++        if (timer > 0)
++        {
++            const uint16_t steps = (timer + Constants::TIMESTEP - 1) / Constants::TIMESTEP;
++            phobj.hspeed = (lastmove.xpos - phobj.crnt_x()) / steps;
++            phobj.vspeed = (lastmove.ypos - phobj.crnt_y()) / steps;
++            timer = timer > Constants::TIMESTEP ? timer - Constants::TIMESTEP : 0;
++        }
++        else
++        {
++            phobj.hspeed = 0.0;
++            phobj.vspeed = 0.0;
++        }
+         phobj.move();
+ 
+         physics.get_fht().update_fh(phobj);
+@@ -79,12 +76,23 @@ namespace jrc
+ 
+     void OtherChar::send_movement(const std::vector<Movement>& newmoves)
+     {
+-        movements.push(newmoves.back());
++        if (newmoves.empty())
++            return;
+ 
+-        if (timer == 0)
++        // Relative fragments contain velocity, not an absolute map position.
++        // They can update the animation while the last absolute endpoint stays.
++        lastmove.newstate = newmoves.back().newstate;
++        for (auto move = newmoves.rbegin(); move != newmoves.rend(); ++move)
+         {
+-            constexpr uint16_t DELAY = 50;
+-            timer = DELAY;
++            if (move->type == Movement::_ABSOLUTE || move->type == Movement::CHAIR
++                || move->type == Movement::JUMPDOWN)
++            {
++                const uint8_t state = lastmove.newstate;
++                lastmove = *move;
++                lastmove.newstate = state;
++                timer = static_cast<uint16_t>(std::clamp<int>(move->duration, Constants::TIMESTEP, 200));
++                break;
++            }
+         }
+     }
+ 
+diff --git a/src/client/Character/OtherChar.h b/src/client/Character/OtherChar.h
+index ce63782..df41e63 100644
+--- a/src/client/Character/OtherChar.h
++++ b/src/client/Character/OtherChar.h
+@@ -21,7 +21,6 @@
+ 
+ #include "../Gameplay/Movement.h"
+ 
+-#include <queue>
+ #include <vector>
+ 
+ namespace jrc
+@@ -55,7 +54,6 @@ namespace jrc
+     private:
+         uint16_t level;
+         int16_t job;
+-        std::queue<Movement> movements;
+         Movement lastmove;
+         uint16_t timer;
+ 
