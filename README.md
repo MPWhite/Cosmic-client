@@ -94,6 +94,30 @@ stop the browser services. The Cosmic server and saved characters are separate.
 Diagnostics are in `.local/browser.log` and `.local/asset-*.log`.
 Set `COSMIC_NO_BROWSER=1` to start the services without opening a browser tab.
 
+### Play on a phone with Tailscale
+
+Connect this Mac and your phone to Tailscale, then double-click
+`play-mobile.command`. It starts the installed services and prints a private
+HTTPS link. Open it in Safari or Chrome and turn the phone sideways. The same
+account and characters work on desktop and mobile; log out on one device before
+using the other. Keep the Mac connected with its lid open while playing. The
+launcher prevents idle sleep while the browser service runs.
+
+The mobile client provides touch movement/action buttons and native text entry
+for login, PIC, chat and NPC prompts. Assets load as needed, so the first visit
+can take longer. Current Safari/Chrome is recommended.
+
+The launcher uses Tailscale Serve on HTTPS ports 8443 (page), 8444 (game), and
+8445 (assets). It preserves existing services on other ports and does not enable
+Funnel. Local services remain bound to loopback; the game bridge accepts only
+the local login server and the three configured channels. To remove phone access:
+
+```sh
+tailscale serve --https=8443 off
+tailscale serve --https=8444 off
+tailscale serve --https=8445 off
+```
+
 The original Windows client was also tested with several Wine versions on Apple
 Silicon and failed during initialization. The Mac scripts use the browser client
 because that route can be built from source and tested locally.

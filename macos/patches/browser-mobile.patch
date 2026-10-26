@@ -1,0 +1,861 @@
+diff --git a/src/client/Gameplay/MapleMap/MapNpcs.cpp b/src/client/Gameplay/MapleMap/MapNpcs.cpp
+index 3ac0f64..464c308 100644
+--- a/src/client/Gameplay/MapleMap/MapNpcs.cpp
++++ b/src/client/Gameplay/MapleMap/MapNpcs.cpp
+@@ -23,9 +23,19 @@
+ #include "../Stage.h"
+ 
+ #include "../../Net/Packets/NpcInteractionPackets.h"
++#include <limits>
+ 
+ namespace jrc
+ {
++    namespace
++    {
++        void interact_with_npc(const Npc& npc)
++        {
++            if (!QuestDelivery::offer_quests(npc.get_id(), npc.get_oid(), npc.isscripted()))
++                TalkToNPCPacket(npc.get_oid()).dispatch();
++        }
++    }
++
+     void MapNpcs::draw(Layer::Id layer, double viewx, double viewy, float alpha) const
+     {
+         npcs.draw(layer, viewx, viewy, alpha);
+@@ -33,6 +43,7 @@ namespace jrc
+ 
+     void MapNpcs::update(const Physics& physics)
+     {
++        talk_cooldown = talk_cooldown > Constants::TIMESTEP ? talk_cooldown - Constants::TIMESTEP : 0;
+         for (; !spawns.empty(); spawns.pop())
+         {
+             quest_refresh_delay = 0;
+@@ -91,6 +102,35 @@ namespace jrc
+     {
+         npcs.clear();
+         quest_refresh_delay = 0;
++        talk_cooldown = 0;
++    }
++
++    bool MapNpcs::talk_nearest(Point<int16_t> playerpos, Point<int16_t> viewpos)
++    {
++        if (talk_cooldown)
++            return false;
++        Npc* nearest = nullptr;
++        int32_t nearest_distance = std::numeric_limits<int32_t>::max();
++        for (auto& entry : npcs)
++        {
++            auto* npc = static_cast<Npc*>(entry.second.get());
++            if (!npc || !npc->can_talk_from(playerpos, viewpos))
++                continue;
++            const int32_t dx = npc->get_position().x() - playerpos.x();
++            const int32_t dy = npc->get_position().y() - playerpos.y();
++            const int32_t distance = dx * dx + dy * dy;
++            if (distance < nearest_distance ||
++                (distance == nearest_distance && nearest && npc->get_oid() < nearest->get_oid()))
++            {
++                nearest = npc;
++                nearest_distance = distance;
++            }
++        }
++        if (!nearest)
++            return false;
++        talk_cooldown = 500;
++        interact_with_npc(*nearest);
++        return true;
+     }
+ 
+     Cursor::State MapNpcs::send_cursor(bool pressed, Point<int16_t> position, Point<int16_t> viewpos)
+@@ -104,11 +144,7 @@ namespace jrc
+                 {
+                     // Body and marker hit tests intentionally share the same
+                     // conversation entry point.
+-                    if (!QuestDelivery::offer_quests(npc->get_id(), npc->get_oid(), npc->isscripted()))
+-                    {
+-                        TalkToNPCPacket(npc->get_oid())
+-                            .dispatch();
+-                    }
++                    interact_with_npc(*npc);
+                     return Cursor::IDLE;
+                 }
+                 else
+diff --git a/src/client/Gameplay/MapleMap/MapNpcs.h b/src/client/Gameplay/MapleMap/MapNpcs.h
+index 9164a46..acf48c7 100644
+--- a/src/client/Gameplay/MapleMap/MapNpcs.h
++++ b/src/client/Gameplay/MapleMap/MapNpcs.h
+@@ -43,6 +43,7 @@ namespace jrc
+ 
+         // Send mouse input to clickable npcs.
+         Cursor::State send_cursor(bool pressed, Point<int16_t> position, Point<int16_t> viewpos);
++        bool talk_nearest(Point<int16_t> playerpos, Point<int16_t> viewpos);
+ 
+         MapObjects* get_npcs()
+         {
+@@ -59,5 +60,6 @@ namespace jrc
+ 
+         std::queue<NpcSpawn> spawns;
+         uint16_t quest_refresh_delay = 0;
++        uint16_t talk_cooldown = 0;
+     };
+ }
+diff --git a/src/client/Gameplay/MapleMap/Npc.cpp b/src/client/Gameplay/MapleMap/Npc.cpp
+index 3c1ed66..00f2e9d 100644
+--- a/src/client/Gameplay/MapleMap/Npc.cpp
++++ b/src/client/Gameplay/MapleMap/Npc.cpp
+@@ -156,6 +156,26 @@ namespace jrc
+         return scripted;
+     }
+ 
++    bool Npc::can_talk_from(Point<int16_t> playerpos, Point<int16_t> viewpos) const
++    {
++        if (!active || mouseonly)
++            return false;
++        const auto animation = animations.find(stance);
++        if (animation == animations.end())
++            return false;
++        const auto dimensions = animation->second.get_dimensions();
++        if (dimensions.x() <= 1 || dimensions.y() <= 1)
++            return false;
++        const auto at = get_position();
++        if (std::abs(static_cast<int32_t>(at.x()) - playerpos.x()) > 150 ||
++            std::abs(static_cast<int32_t>(at.y()) - playerpos.y()) > 100)
++            return false;
++        const auto bounds = DrawArgument(at + viewpos, flip).get_rectangle(
++            animation->second.get_origin(), dimensions);
++        return std::max(bounds.l(), bounds.r()) >= 0 && std::min(bounds.l(), bounds.r()) < Constants::viewwidth() &&
++            std::max(bounds.t(), bounds.b()) >= 0 && std::min(bounds.t(), bounds.b()) < Constants::viewheight();
++    }
++
+     void Npc::set_quest_marker(Questlog::NpcMarker marker)
+     {
+         if (quest_marker == marker)
+diff --git a/src/client/Gameplay/MapleMap/Npc.h b/src/client/Gameplay/MapleMap/Npc.h
+index f716fcb..2882941 100644
+--- a/src/client/Gameplay/MapleMap/Npc.h
++++ b/src/client/Gameplay/MapleMap/Npc.h
+@@ -51,6 +51,8 @@ namespace jrc
+         bool isscripted() const;
+         // Check if the npc is in range of the cursor.
+         bool inrange(Point<int16_t> cursorpos, Point<int16_t> viewpos) const;
++        // Keyboard/touch Talk targets nearby visible actors, not hidden scripts.
++        bool can_talk_from(Point<int16_t> playerpos, Point<int16_t> viewpos) const;
+ 
+         void set_quest_marker(Questlog::NpcMarker marker);
+ 
+diff --git a/src/client/Gameplay/Stage.cpp b/src/client/Gameplay/Stage.cpp
+index fb47f7c..c0add88 100644
+--- a/src/client/Gameplay/Stage.cpp
++++ b/src/client/Gameplay/Stage.cpp
+@@ -416,6 +416,9 @@ namespace jrc
+                     // Immediate pickup on key press
+                     check_drops();
+                     break;
++                case KeyAction::NPCCHAT:
++                    npcs.talk_nearest(player.get_position(), camera.position());
++                    break;
+                 default:
+                     break;
+                 }
+diff --git a/src/client/IO/Components/Textfield.h b/src/client/IO/Components/Textfield.h
+index f83ef70..3d60f23 100644
+--- a/src/client/IO/Components/Textfield.h
++++ b/src/client/IO/Components/Textfield.h
+@@ -64,6 +64,8 @@ namespace jrc
+         State get_state() const;
+         Rectangle<int16_t> get_bounds() const;
+         const std::string& get_text() const;
++        bool is_secret() const { return crypt > 0; }
++        size_t get_limit() const { return limit; }
+ 
+     private:
+         void modifytext(const std::string&);
+diff --git a/src/client/IO/UI.cpp b/src/client/IO/UI.cpp
+index e8eb216..38cddd4 100644
+--- a/src/client/IO/UI.cpp
++++ b/src/client/IO/UI.cpp
+@@ -28,6 +28,24 @@
+ 
+ #include <GLFW/glfw3.h>
+ #include <list>
++#ifdef MS_PLATFORM_WASM
++#include <emscripten.h>
++
++extern "C" {
++    EMSCRIPTEN_KEEPALIVE void maple_mobile_action(int action, int pressed)
++    {
++        jrc::UI::get().send_mobile_action(action, pressed != 0);
++    }
++    EMSCRIPTEN_KEEPALIVE void maple_mobile_command(int command)
++    {
++        jrc::UI::get().send_mobile_command(command);
++    }
++    EMSCRIPTEN_KEEPALIVE void maple_mobile_text(unsigned int token, const char* value)
++    {
++        jrc::UI::get().set_mobile_text(token, value);
++    }
++}
++#endif
+ 
+ namespace jrc
+ {
+@@ -59,6 +77,9 @@ namespace jrc
+ 
+         scrollingnotice.update();
+         cursor.update();
++#ifdef MS_PLATFORM_WASM
++        sync_mobile_textfield();
++#endif
+     }
+ 
+     void UI::enable()
+@@ -87,6 +108,9 @@ namespace jrc
+             state = std::make_unique<UIStateGame>();
+             break;
+         }
++#ifdef MS_PLATFORM_WASM
++        EM_ASM({ if (window.MapleMobile) window.MapleMobile.setGameState($0); }, id);
++#endif
+     }
+ 
+     void UI::quit()
+@@ -324,6 +348,9 @@ namespace jrc
+         }
+ 
+         focusedtextfield = tofocus;
++#ifdef MS_PLATFORM_WASM
++        ++mobile_field_token;
++#endif
+     }
+ 
+     void UI::blur_textfield(Textfield* textfield)
+@@ -344,6 +371,101 @@ namespace jrc
+         focusedtextfield = {};
+     }
+ 
++#ifdef MS_PLATFORM_WASM
++    void UI::sync_mobile_textfield()
++    {
++        const uint32_t token = focusedtextfield ? mobile_field_token : 0;
++        const std::string value = focusedtextfield ? focusedtextfield->get_text() : "";
++        if (token == mobile_synced_token && value == mobile_synced_text)
++            return;
++        mobile_synced_token = token;
++        mobile_synced_text = value;
++        EM_ASM({
++            if (window.MapleMobile)
++                window.MapleMobile.setFocusedField($0, UTF8ToString($1), !!$2, $3);
++        }, token, value.c_str(), focusedtextfield && focusedtextfield->is_secret(),
++            focusedtextfield ? focusedtextfield->get_limit() : 0);
++    }
++
++    void UI::set_mobile_text(uint32_t token, const char* value)
++    {
++        // A delayed input event must never write into a newly opened dialog.
++        if (!enabled || !focusedtextfield || token != mobile_field_token || !value)
++            return;
++        std::string printable;
++        for (const unsigned char* c = reinterpret_cast<const unsigned char*>(value); *c; ++c)
++            if (*c >= 32 && *c <= 126)
++                printable += static_cast<char>(*c);
++        focusedtextfield->change_text("");
++        focusedtextfield->add_string(printable);
++        sync_mobile_textfield();
++    }
++
++    void UI::send_mobile_action(int32_t action, bool pressed)
++    {
++        switch (action)
++        {
++        case KeyAction::LEFT: case KeyAction::RIGHT:
++        case KeyAction::UP: case KeyAction::DOWN:
++        case KeyAction::ATTACK: case KeyAction::JUMP:
++        case KeyAction::PICKUP: case KeyAction::NPCCHAT:
++            break;
++        default:
++            return;
++        }
++        // Releases bypass modal focus just like physical key releases.
++        if (!pressed)
++            Stage::get().send_key(KeyType::ACTION, action, false);
++        else if (enabled)
++        {
++            // Tapping a game control leaves chat just like clicking the map;
++            // hiding the phone keyboard alone does not blur a canvas field.
++            remove_textfield();
++            state->send_key(KeyType::ACTION, action, true, false);
++            sync_mobile_textfield();
++        }
++    }
++
++    void UI::send_mobile_command(int32_t command)
++    {
++        if (!enabled)
++            return;
++        switch (command)
++        {
++        case 0:
++            send_key(GLFW_KEY_ENTER, true);
++            send_key(GLFW_KEY_ENTER, false);
++            break;
++        case 7:
++            if (!focusedtextfield)
++            {
++                send_key(GLFW_KEY_ENTER, true);
++                send_key(GLFW_KEY_ENTER, false);
++            }
++            break;
++        case 1:
++            send_key(GLFW_KEY_TAB, true);
++            send_key(GLFW_KEY_TAB, false);
++            break;
++        case 2:
++            send_key(GLFW_KEY_ESCAPE, true);
++            send_key(GLFW_KEY_ESCAPE, false);
++            break;
++        case 3: case 4: case 5: case 6:
++            {
++                remove_textfield();
++                const KeyAction::Id menus[] = {KeyAction::INVENTORY,
++                    KeyAction::SKILLBOOK, KeyAction::CHARSTATS, KeyAction::QUESTLOG};
++                send_menu(menus[command - 3]);
++            }
++            break;
++        default:
++            break;
++        }
++        sync_mobile_textfield();
++    }
++#endif
++
+     void UI::drag_icon(Icon* icon)
+     {
+         state->drag_icon(icon);
+diff --git a/src/client/IO/UI.h b/src/client/IO/UI.h
+index b1c31d1..732af9f 100644
+--- a/src/client/IO/UI.h
++++ b/src/client/IO/UI.h
+@@ -66,6 +66,12 @@ namespace jrc
+         void doubleclick();
+         void send_key(int32_t keycode, bool pressed);
+         void send_menu(KeyAction::Id action);
++#ifdef MS_PLATFORM_WASM
++        void send_mobile_action(int32_t action, bool pressed);
++        void send_mobile_command(int32_t command);
++        void set_mobile_text(uint32_t token, const char* text);
++        void sync_mobile_textfield();
++#endif
+ 
+         void set_scrollnotice(const std::string& notice);
+         void focus_textfield(Textfield* textfield);
+@@ -101,6 +107,11 @@ namespace jrc
+         Optional<Textfield> focusedtextfield;
+         std::unordered_map<int32_t, bool> is_key_down;
+         uint64_t cursor_press_id;
++#ifdef MS_PLATFORM_WASM
++        uint32_t mobile_field_token = 0;
++        uint32_t mobile_synced_token = 0;
++        std::string mobile_synced_text;
++#endif
+ 
+         bool enabled;
+         bool quitted;
+diff --git a/src/client/IO/Window.cpp b/src/client/IO/Window.cpp
+index 091d63f..d7d4055 100644
+--- a/src/client/IO/Window.cpp
++++ b/src/client/IO/Window.cpp
+@@ -109,6 +109,9 @@ namespace jrc
+                     static_cast<int16_t>(ypos)
+                 );
+ 
++                // A touch starts at its tap position without a preceding mouse
++                // move. Synchronize it before dispatching the button press.
++                UI::get().send_cursor(position);
+                 UI::get().send_cursor(true);
+                 if (is_doubleclick(position))
+                 {
+diff --git a/tests/test_mobile_controls.py b/tests/test_mobile_controls.py
+new file mode 100644
+index 0000000..fe46c8d
+--- /dev/null
++++ b/tests/test_mobile_controls.py
+@@ -0,0 +1,121 @@
++"""Browser-only input regressions; requires Playwright and Google Chrome.
++
++    python tests/test_mobile_controls.py
++
++These tests use a mock WASM bridge, so no game account or server is needed.
++"""
++from pathlib import Path
++import unittest
++
++from playwright.sync_api import sync_playwright
++
++
++WEB = Path(__file__).resolve().parents[1] / "web"
++
++
++class MobileControlsTest(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.playwright = sync_playwright().start()
++        cls.browser = cls.playwright.chromium.launch(channel="chrome")
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.browser.close()
++        cls.playwright.stop()
++
++    def setUp(self):
++        self.context = self.browser.new_context(
++            viewport={"width": 844, "height": 390}, is_mobile=True, has_touch=True
++        )
++        self.page = self.context.new_page()
++        self.errors = []
++        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
++        self.load(self.page)
++
++    def tearDown(self):
++        self.context.close()
++        self.assertEqual(self.errors, [])
++
++    def load(self, page):
++        page.set_content('<meta name="viewport" content="width=device-width, initial-scale=1"><canvas id="canvas"></canvas>')
++        page.add_style_tag(path=str(WEB / "mobile-controls.css"))
++        page.evaluate("""() => {
++            window.calls = [];
++            window.Module = {ccall: (name, result, types, args) => calls.push([name, ...args])};
++        }""")
++        page.add_script_tag(path=str(WEB / "mobile-controls.js"))
++        page.evaluate("MapleMobile.ready(); MapleMobile.setGameState(1)")
++
++    def calls(self):
++        return self.page.evaluate("calls")
++
++    def center(self, selector):
++        box = self.page.locator(selector).bounding_box()
++        return {"x": box["x"] + box["width"] / 2, "y": box["y"] + box["height"] / 2}
++
++    def test_multitouch_actions_release_on_cancel(self):
++        session = self.context.new_cdp_session(self.page)
++        right = dict(self.center('[data-action="61"]'), id=1)
++        jump = dict(self.center('[data-action="53"]'), id=2)
++        session.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [right]})
++        session.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [right, jump]})
++        session.send("Input.dispatchTouchEvent", {"type": "touchCancel", "touchPoints": []})
++        self.assertEqual(self.calls(), [
++            ["maple_mobile_action", 61, 1], ["maple_mobile_action", 53, 1],
++            ["maple_mobile_action", 61, 0], ["maple_mobile_action", 53, 0],
++        ])
++        self.assertEqual(self.page.locator(".held").count(), 0)
++
++    def test_blur_and_state_change_release_actions(self):
++        point = self.center('[data-action="60"]')
++        self.page.mouse.move(**point)
++        self.page.mouse.down()
++        self.page.evaluate("window.dispatchEvent(new Event('blur'))")
++        self.page.mouse.up()
++        self.assertEqual(self.calls(), [["maple_mobile_action", 60, 1], ["maple_mobile_action", 60, 0]])
++        self.page.mouse.down()
++        self.page.evaluate("MapleMobile.setGameState(0)")
++        self.page.mouse.up()
++        self.assertEqual(self.calls()[-2:], [["maple_mobile_action", 60, 1], ["maple_mobile_action", 60, 0]])
++
++    def test_native_text_masks_secret_and_isolates_keyboard(self):
++        self.page.evaluate("""() => {
++            MapleMobile.setGameState(0);
++            MapleMobile.setFocusedField(17, '', true, 12);
++            window.gameKeys = [];
++            window.addEventListener('keydown', event => gameKeys.push(event.key), true);
++        }""")
++        field = self.page.locator("#mobile-input")
++        self.assertEqual(field.get_attribute("type"), "password")
++        field.fill("example")
++        field.press("Backspace")
++        field.press("Tab")
++        self.assertEqual(self.page.evaluate("gameKeys"), [])
++        self.assertEqual(self.calls(), [
++            ["maple_mobile_text", 17, "example"],
++            ["maple_mobile_text", 17, "exampl"],
++            ["maple_mobile_command", 1],
++        ])
++        self.page.evaluate("MapleMobile.setFocusedField(18, 'new', false, 20)")
++        self.assertEqual(field.input_value(), "new")
++        self.assertEqual(field.get_attribute("type"), "text")
++        self.page.evaluate("MapleMobile.setFocusedField(0, '', false, 0)")
++        self.assertEqual(field.input_value(), "")
++        self.assertFalse(self.page.locator("#mobile-editor").is_visible())
++
++    def test_desktop_unchanged(self):
++        context = self.browser.new_context(viewport={"width": 1200, "height": 800})
++        try:
++            page = context.new_page()
++            self.load(page)
++            page.evaluate("MapleMobile.setFocusedField(7, 'example', true, 12)")
++            self.assertFalse(page.locator("#mobile-ui").is_visible())
++            self.assertEqual(page.locator("#mobile-input").input_value(), "")
++            self.assertFalse(page.evaluate("document.body.classList.contains('mobile-game')"))
++        finally:
++            context.close()
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/web/index.html b/web/index.html
+index 8c293fe..ce18b9d 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -3,8 +3,9 @@
+ 
+ <head>
+     <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+     <title>MapleStory WASM Client</title>
++    <link rel="stylesheet" href="/web/mobile-controls.css">
+     <style>
+         body {
+             margin: 0;
+@@ -62,6 +63,7 @@
+     <div id="connection-status" hidden role="dialog" aria-modal="true" aria-labelledby="connection-message">
+         <section><p id="connection-message"></p><button type="button" id="reconnect">Reconnect</button></section>
+     </div>
++    <script src="/web/mobile-controls.js"></script>
+     <script>
+         (function () {
+             const GAME_WIDTH = 800;
+@@ -105,13 +107,17 @@
+                 // Keep the render surface fixed and only scale it with CSS.
+                 syncCanvasResolution(canvas);
+ 
+-                const { width, height } = getFittedCanvasSize(window.innerWidth, window.innerHeight);
++                const mobileViewport = window.MapleMobile && window.MapleMobile.enabled && window.visualViewport;
++                const { width, height } = getFittedCanvasSize(
++                    mobileViewport ? mobileViewport.width : window.innerWidth,
++                    mobileViewport ? mobileViewport.height : window.innerHeight);
+ 
+                 canvas.style.width = width + 'px';
+                 canvas.style.height = height + 'px';
+             }
+ 
+             function showConnectionStatus(message, label) {
++                if (window.MapleMobile) window.MapleMobile.releaseAll();
+                 document.getElementById('connection-message').textContent = message;
+                 const button = document.getElementById('reconnect');
+                 button.textContent = label;
+@@ -179,6 +185,7 @@
+ 
+             onRuntimeInitialized: function () {
+                 console.log('[runtime] Initialized');
++                if (window.MapleMobile) window.MapleMobile.ready();
+                 if (window.MapleWasmUI && window.MapleWasmUI.applyScale) {
+                     window.MapleWasmUI.applyScale();
+                 }
+@@ -206,6 +213,14 @@
+                 return response.json();
+             })
+             .then(config => {
++                if (location.protocol === 'https:' && location.port === '8443') {
++                    config = Object.assign({}, config, {
++                        AssetsServerIP: location.hostname, AssetsServerPort: 8445,
++                        AssetsServerProtocol: 'wss', ProxyIP: location.hostname,
++                        ProxyPort: '8444', MapleStoryServerIp: '127.0.0.1',
++                        MapleStoryServerPort: '8484'
++                    });
++                }
+                 if (config) {
+                     let hasConfig = false;
+                     const lazyConfig = {};
+diff --git a/web/mobile-controls.css b/web/mobile-controls.css
+new file mode 100644
+index 0000000..438c850
+--- /dev/null
++++ b/web/mobile-controls.css
+@@ -0,0 +1,60 @@
++#mobile-ui { display: none; }
++body.mobile-game { touch-action: none; height: var(--mobile-height, 100dvh); }
++body.mobile-game #canvas { touch-action: none; }
++body.mobile-game #mobile-ui {
++    display: block; position: fixed; inset: 0; height: var(--mobile-height, 100dvh);
++    z-index: 5; pointer-events: none; user-select: none; -webkit-user-select: none;
++    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
++    box-sizing: border-box; font-size: 12px;
++}
++#mobile-ui button {
++    pointer-events: auto; touch-action: none; border: 1px solid #ffffff80;
++    border-radius: 12px; color: white; background: #152a42bd; font: 600 12px system-ui;
++    min-height: 40px; padding: 7px 10px; -webkit-tap-highlight-color: transparent;
++    box-shadow: 0 2px 5px #0008;
++}
++#mobile-ui button:active, #mobile-ui button.held { background: #c27f1ce6; }
++#mobile-ui button:disabled { opacity: .4; }
++#mobile-toolbar {
++    position: absolute; top: max(5px, env(safe-area-inset-top)); left: max(5px, env(safe-area-inset-left));
++    right: max(5px, env(safe-area-inset-right)); display: flex; gap: 5px; flex-wrap: wrap;
++}
++#mobile-toolbar button { min-height: 34px; padding: 5px 9px; }
++#mobile-toolbar .mobile-game-only { display: none; }
++#mobile-ui.in-game #mobile-toolbar .mobile-game-only { display: block; }
++#mobile-keyboard { margin-left: auto; }
++#mobile-dpad, #mobile-actions { display: none; position: absolute; bottom: max(12px, env(safe-area-inset-bottom)); gap: 5px; }
++#mobile-ui.in-game #mobile-dpad, #mobile-ui.in-game #mobile-actions { display: grid; }
++#mobile-dpad { left: max(8px, env(safe-area-inset-left)); grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); }
++#mobile-dpad button { font-size: 23px; padding: 0; }
++#mobile-dpad [data-action="62"] { grid-column: 2; }
++#mobile-dpad [data-action="60"] { grid-column: 1; grid-row: 2; }
++#mobile-dpad [data-action="61"] { grid-column: 3; grid-row: 2; }
++#mobile-dpad [data-action="63"] { grid-column: 2; grid-row: 3; }
++#mobile-actions { right: max(8px, env(safe-area-inset-right)); grid-template-columns: repeat(2, 57px); grid-template-rows: repeat(2, 55px); }
++#mobile-actions [data-action="52"] { background: #a64b21cc; }
++#mobile-actions [data-action="53"] { background: #236e9dcc; }
++#mobile-rotate {
++    display: none; position: absolute; top: 54px; left: 15px; right: 15px;
++    text-align: center; padding: 9px; border-radius: 8px; background: #152a42e6;
++}
++#mobile-editor {
++    pointer-events: auto; position: absolute; bottom: max(6px, env(safe-area-inset-bottom));
++    left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right));
++    display: flex; align-items: center; gap: 6px; padding: 7px; border-radius: 10px;
++    background: #152a42f5; box-shadow: 0 3px 12px #0009;
++}
++#mobile-editor[hidden] { display: none; }
++#mobile-input {
++    min-width: 0; flex: 1; box-sizing: border-box; height: 40px; padding: 6px 10px;
++    border: 1px solid #adc5d5; border-radius: 5px; font: 16px system-ui;
++    color: #152a42; background: #fff; user-select: text; -webkit-user-select: text; touch-action: auto;
++}
++#mobile-ui.editing #mobile-dpad, #mobile-ui.editing #mobile-actions { display: none; }
++#mobile-ui.editing #mobile-rotate { display: none; }
++@media (orientation: portrait) {
++    #mobile-rotate { display: block; }
++    #mobile-toolbar button { padding: 5px 7px; }
++    #mobile-editor { flex-wrap: wrap; }
++    #mobile-input { flex-basis: 100%; }
++}
+diff --git a/web/mobile-controls.js b/web/mobile-controls.js
+new file mode 100644
+index 0000000..9608461
+--- /dev/null
++++ b/web/mobile-controls.js
+@@ -0,0 +1,197 @@
++(function () {
++    'use strict';
++    const enabled = window.matchMedia('(pointer: coarse)').matches;
++    let ready = false;
++    let gameState = 0;
++    let fieldToken = 0;
++    let editing = false;
++    const pointers = new Map();
++    const counts = new Map();
++    const ui = document.createElement('div');
++    ui.id = 'mobile-ui';
++    ui.innerHTML = `
++        <div id="mobile-toolbar">
++            <button type="button" data-command="2" aria-label="Close dialog or open menu">Back</button>
++            <button type="button" class="mobile-game-only" data-command="3">Items</button>
++            <button type="button" class="mobile-game-only" data-command="4">Skills</button>
++            <button type="button" class="mobile-game-only" data-command="6">Quests</button>
++            <button type="button" class="mobile-game-only" data-command="7">Chat</button>
++            <button type="button" id="mobile-keyboard" disabled>Keyboard</button>
++        </div>
++        <div id="mobile-rotate">Rotate your phone to landscape for larger controls. Tap game buttons and NPCs directly.</div>
++        <div id="mobile-dpad" aria-label="Movement">
++            <button type="button" data-action="62" aria-label="Up / enter portal">▲</button>
++            <button type="button" data-action="60" aria-label="Move left">◀</button>
++            <button type="button" data-action="61" aria-label="Move right">▶</button>
++            <button type="button" data-action="63" aria-label="Down">▼</button>
++        </div>
++        <div id="mobile-actions" aria-label="Actions">
++            <button type="button" data-action="54">Talk</button>
++            <button type="button" data-action="50">Loot</button>
++            <button type="button" data-action="52">Attack</button>
++            <button type="button" data-action="53">Jump</button>
++        </div>
++        <form id="mobile-editor" hidden autocomplete="off">
++            <input id="mobile-input" aria-label="Selected game text field" placeholder="Tap here to type" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="done">
++            <button type="button" id="mobile-next">Next</button>
++            <button type="submit">Done</button>
++            <button type="button" id="mobile-hide" aria-label="Hide keyboard">Hide</button>
++        </form>`;
++    document.body.appendChild(ui);
++    const input = document.getElementById('mobile-input');
++    const editor = document.getElementById('mobile-editor');
++    const keyboard = document.getElementById('mobile-keyboard');
++
++    function call(name, types, args) {
++        if (!enabled || !ready || typeof Module === 'undefined' || typeof Module.ccall !== 'function') return;
++        Module.ccall(name, null, types, args);
++    }
++    function action(id, down) {
++        call('maple_mobile_action', ['number', 'number'], [id, down ? 1 : 0]);
++    }
++    function releasePointer(pointerId) {
++        const button = pointers.get(pointerId);
++        if (!button) return;
++        pointers.delete(pointerId);
++        const id = Number(button.dataset.action);
++        const count = (counts.get(id) || 1) - 1;
++        counts.set(id, count);
++        if (!count) {
++            button.classList.remove('held');
++            action(id, false);
++        }
++    }
++    function releaseAll() {
++        for (const pointerId of Array.from(pointers.keys())) releasePointer(pointerId);
++    }
++    function command(id) {
++        releaseAll();
++        call('maple_mobile_command', ['number'], [id]);
++    }
++    function setEditing(value) {
++        editing = value && !!fieldToken;
++        ui.classList.toggle('editing', editing);
++        editor.hidden = !editing;
++        if (!editing) input.blur();
++    }
++    function openKeyboard() {
++        if (!fieldToken || !ready) return;
++        releaseAll();
++        setEditing(true);
++        // The focus call stays inside the tap event for iOS's keyboard policy.
++        input.focus({ preventScroll: true });
++    }
++    function updateViewport() {
++        if (!enabled) return;
++        const viewport = window.visualViewport;
++        const height = viewport ? viewport.height : window.innerHeight;
++        document.documentElement.style.setProperty('--mobile-height', `${Math.floor(height)}px`);
++        if (window.MapleWasmUI) window.MapleWasmUI.applyScale();
++    }
++
++    window.MapleMobile = {
++        enabled,
++        ready: function () { ready = true; },
++        isEditing: function () { return enabled && editing; },
++        releaseAll,
++        setGameState: function (state) {
++            releaseAll();
++            gameState = state;
++            ui.classList.toggle('in-game', state === 1);
++        },
++        setFocusedField: function (token, value, secret, limit) {
++            if (!enabled) return;
++            const changed = token !== fieldToken;
++            fieldToken = token;
++            keyboard.disabled = !token;
++            if (!token) {
++                input.value = '';
++                setEditing(false);
++                return;
++            }
++            input.type = secret ? 'password' : 'text';
++            input.maxLength = limit > 0 ? limit : 255;
++            if (input.value !== value) input.value = value;
++            input.setAttribute('aria-label', secret ? 'Selected password or PIC field' : 'Selected game text field');
++            if (changed) {
++                releaseAll();
++                // Login gets a visible input immediately, without opening the OS
++                // keyboard until the player taps. Game dialogs use Keyboard.
++                if (gameState !== 1 || editing) setEditing(true);
++            }
++        }
++    };
++    if (!enabled) return;
++    document.body.classList.add('mobile-game');
++
++    for (const button of ui.querySelectorAll('[data-action]')) {
++        button.addEventListener('pointerdown', event => {
++            event.preventDefault();
++            if (!ready || editing) return;
++            releasePointer(event.pointerId);
++            const id = Number(button.dataset.action);
++            pointers.set(event.pointerId, button);
++            const count = counts.get(id) || 0;
++            counts.set(id, count + 1);
++            button.classList.add('held');
++            button.setPointerCapture(event.pointerId);
++            if (!count) action(id, true);
++        });
++        for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'])
++            button.addEventListener(type, event => releasePointer(event.pointerId));
++        button.addEventListener('contextmenu', event => event.preventDefault());
++    }
++    for (const button of ui.querySelectorAll('[data-command]')) {
++        button.addEventListener('click', () => {
++            const id = Number(button.dataset.command);
++            if (id === 2 && editing) { setEditing(false); return; }
++            command(id);
++            if (id === 7) openKeyboard();
++        });
++    }
++    keyboard.addEventListener('click', openKeyboard);
++    input.addEventListener('focus', () => { releaseAll(); setEditing(true); });
++    input.addEventListener('input', () => {
++        if (!fieldToken) return;
++        // This legacy client's text renderer and protocol use single-byte text.
++        const value = input.value.replace(/[^\x20-\x7E]/g, '');
++        if (input.value !== value) input.value = value;
++        call('maple_mobile_text', ['number', 'string'], [fieldToken, value]);
++    });
++    document.getElementById('mobile-next').addEventListener('click', () => {
++        command(1);
++        openKeyboard();
++    });
++    editor.addEventListener('submit', event => {
++        event.preventDefault();
++        command(0);
++        if (fieldToken && editing) openKeyboard();
++    });
++    document.getElementById('mobile-hide').addEventListener('click', () => setEditing(false));
++
++    // GLFW installs window keyboard listeners. Stop native input events before
++    // they reach it, otherwise each character is inserted into the game twice
++    // and Backspace/Tab lose their normal browser behavior.
++    for (const type of ['keydown', 'keyup', 'keypress']) {
++        window.addEventListener(type, event => {
++            if (event.target !== input) return;
++            event.stopImmediatePropagation();
++            if (type === 'keydown' && event.key === 'Enter') {
++                event.preventDefault();
++                command(0);
++            } else if (type === 'keydown' && event.key === 'Escape') {
++                event.preventDefault();
++                setEditing(false);
++            } else if (type === 'keydown' && event.key === 'Tab') {
++                event.preventDefault();
++                command(1);
++            }
++        }, true);
++    }
++    window.addEventListener('blur', releaseAll);
++    window.addEventListener('pagehide', releaseAll);
++    document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
++    window.addEventListener('resize', () => { releaseAll(); updateViewport(); });
++    if (window.visualViewport) window.visualViewport.addEventListener('resize', updateViewport);
++    updateViewport();
++})();
+diff --git a/web/ws_proxy.py b/web/ws_proxy.py
+index fd38f37..bfc6566 100644
+--- a/web/ws_proxy.py
++++ b/web/ws_proxy.py
+@@ -24,6 +24,9 @@ import os
+ class MapleStoryProxy:
+     """Proxy that forwards data between WebSocket and TCP connections."""
+ 
++    def __init__(self, allowed_targets=None):
++        self.allowed_targets = allowed_targets
++
+     async def handle_client(self, websocket):
+         """Handle a WebSocket client connection."""
+         client_addr = websocket.remote_address
+@@ -59,6 +62,10 @@ class MapleStoryProxy:
+                 print(f"[Error] Invalid target format '{target_str}', expected 'host:port'")
+                 await websocket.close()
+                 return
++
++            if self.allowed_targets is not None and (tcp_host, tcp_port) not in self.allowed_targets:
++                await websocket.close(code=1008, reason='Only the configured game server is available.')
++                return
+             
+             print(f"[WebSocket] Client requested connection to {tcp_host}:{tcp_port}")
+ 

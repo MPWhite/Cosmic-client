@@ -18,6 +18,7 @@ STATE = ROOT / '.local'
 CHECKOUT = STATE / 'browser-client'
 ASSETS = STATE / 'browser-assets'
 PID_FILE = STATE / 'browser.pid'
+TAILNET_FILE = STATE / 'tailnet.json'
 URL = 'http://127.0.0.1:8000'
 
 
@@ -61,6 +62,8 @@ async def serve():
             files = {'/': CHECKOUT / 'web/index.html',
                      '/web/index.html': CHECKOUT / 'web/index.html',
                      '/web/config.json': CHECKOUT / 'web/config.json'}
+            for name in ('mobile-controls.js', 'mobile-controls.css'):
+                files['/web/' + name] = CHECKOUT / 'web' / name
             for name in ('JourneyClient.js', 'JourneyClient.wasm', 'JourneyClient.wasm.map'):
                 files['/build/' + name] = CHECKOUT / 'build' / name
             for asset in ASSETS.glob('*.nx'):
@@ -69,7 +72,8 @@ async def serve():
 
         def do_GET(self):
             if self.path == '/health':
-                payload = json.dumps({'project': str(ROOT), 'pid': os.getpid()}).encode()
+                payload = json.dumps({'project': str(ROOT), 'pid': os.getpid(),
+                                      'origins': origins}).encode()
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(payload)))
@@ -83,12 +87,17 @@ async def serve():
 
     httpd = ThreadingHTTPServer(('127.0.0.1', 8000), LocalHandler)
     assets = AssetServer(str(ASSETS))
-    proxy = MapleStoryProxy()
+    proxy = MapleStoryProxy(allowed_targets={('127.0.0.1', port) for port in (8484, 7575, 7576, 7577)})
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
     origins = ['http://127.0.0.1:8000', 'http://localhost:8000']
+    if TAILNET_FILE.exists():
+        origin = json.loads(TAILNET_FILE.read_text()).get('origin', '')
+        parsed = urlsplit(origin)
+        if parsed.scheme == 'https' and parsed.hostname and parsed.hostname.endswith('.ts.net') and parsed.port == 8443:
+            origins.append(origin)
     http_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     try:
         async with websockets.serve(assets.handler, '127.0.0.1', 8765,
