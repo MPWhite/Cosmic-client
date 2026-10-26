@@ -2,17 +2,14 @@ diff --git a/src/client/Character/OtherChar.cpp b/src/client/Character/OtherChar
 index a795b92..839c7a9 100644
 --- a/src/client/Character/OtherChar.cpp
 +++ b/src/client/Character/OtherChar.cpp
-@@ -19,6 +19,8 @@
- 
+@@ -20,4 +20,6 @@
  #include "../Constants.h"
  
 +#include <algorithm>
 +
  namespace jrc
  {
-     OtherChar::OtherChar(int32_t id, const CharLook& lk, uint8_t lvl,
-@@ -39,31 +41,26 @@ namespace jrc
- 
+@@ -40,21 +42,4 @@ namespace jrc
      int8_t OtherChar::update(const Physics& physics)
      {
 -        if (timer > 1)
@@ -34,8 +31,7 @@ index a795b92..839c7a9 100644
 -
          if (!attacking)
          {
-             uint8_t laststate = lastmove.newstate;
-             set_state(laststate);
+@@ -63,6 +48,18 @@ namespace jrc
          }
  
 -        phobj.hspeed = lastmove.xpos - phobj.crnt_x();
@@ -56,9 +52,7 @@ index a795b92..839c7a9 100644
 +        }
          phobj.move();
  
-         physics.get_fht().update_fh(phobj);
-@@ -79,12 +76,23 @@ namespace jrc
- 
+@@ -80,10 +77,21 @@ namespace jrc
      void OtherChar::send_movement(const std::vector<Movement>& newmoves)
      {
 -        movements.push(newmoves.back());
@@ -84,24 +78,19 @@ index a795b92..839c7a9 100644
 +            }
          }
      }
- 
 diff --git a/src/client/Character/OtherChar.h b/src/client/Character/OtherChar.h
 index ce63782..df41e63 100644
 --- a/src/client/Character/OtherChar.h
 +++ b/src/client/Character/OtherChar.h
-@@ -21,7 +21,6 @@
- 
+@@ -22,5 +22,4 @@
  #include "../Gameplay/Movement.h"
  
 -#include <queue>
  #include <vector>
  
- namespace jrc
-@@ -55,7 +54,6 @@ namespace jrc
-     private:
+@@ -56,5 +55,4 @@ namespace jrc
          uint16_t level;
          int16_t job;
 -        std::queue<Movement> movements;
          Movement lastmove;
          uint16_t timer;
- 
