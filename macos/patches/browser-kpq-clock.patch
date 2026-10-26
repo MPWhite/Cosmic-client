@@ -1,0 +1,448 @@
+diff --git a/src/client/Gameplay/MapleMap/FieldClockState.h b/src/client/Gameplay/MapleMap/FieldClockState.h
+new file mode 100644
+--- /dev/null
++++ b/src/client/Gameplay/MapleMap/FieldClockState.h
+@@ -0,0 +1,60 @@
++#pragma once
++#include "../../Net/InPacket.h"
++#include "../../Net/PacketError.h"
++#include <algorithm>
++#include <cstdint>
++#include <iomanip>
++#include <sstream>
++#include <string>
++
++namespace jrc
++{
++    // Server CLOCK(147) and STOP_CLOCK(154), measured against monotonic time:
++    // rendering pauses and loading a map cannot extend an event's deadline.
++    class FieldClockState
++    {
++    public:
++        bool receive(InPacket& packet, int64_t now_ms)
++        {
++            const int type = packet.read_byte();
++            if (type == 1)
++            {
++                const int hour = packet.read_byte(), minute = packet.read_byte(), second = packet.read_byte();
++                if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59)
++                    throw PacketError("Invalid wall clock time");
++                origin = now_ms;
++                time_of_day = hour * 3600 + minute * 60 + second;
++                mode = WALL;
++            }
++            else if (type == 2 || type == 3)
++            {
++                if (type == 3) packet.read_byte();
++                const int32_t seconds = packet.read_int();
++                deadline = now_ms + static_cast<int64_t>(std::max(0, seconds)) * 1000;
++                mode = COUNTDOWN;
++            }
++            else return false;
++            return true;
++        }
++
++        void clear() { mode = HIDDEN; }
++        bool visible() const { return mode != HIDDEN; }
++        std::string label(int64_t now_ms) const
++        {
++            if (!visible()) return {};
++            const int64_t seconds = mode == COUNTDOWN
++                ? std::max<int64_t>(0, deadline - now_ms + 999) / 1000
++                : (time_of_day + std::max<int64_t>(0, now_ms - origin) / 1000) % (24 * 3600);
++            std::ostringstream text;
++            text << std::setfill('0');
++            if (mode == WALL) text << std::setw(2) << seconds / 3600 << ':';
++            text << std::setw(2) << (mode == WALL ? seconds / 60 % 60 : seconds / 60)
++                 << ':' << std::setw(2) << seconds % 60;
++            return text.str();
++        }
++
++    private:
++        enum Mode { HIDDEN, COUNTDOWN, WALL } mode = HIDDEN;
++        int64_t deadline = 0, origin = 0, time_of_day = 0;
++    };
++}
+diff --git a/src/client/Gameplay/MapleMap/MapClock.cpp b/src/client/Gameplay/MapleMap/MapClock.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/client/Gameplay/MapleMap/MapClock.cpp
+@@ -0,0 +1,44 @@
++#include "MapClock.h"
++#include "../../Constants.h"
++#include "nlnx/nx.hpp"
++#include <chrono>
++
++namespace jrc
++{
++    namespace
++    {
++        int64_t now_ms()
++        {
++            return std::chrono::duration_cast<std::chrono::milliseconds>(
++                std::chrono::steady_clock::now().time_since_epoch()).count();
++        }
++    }
++
++    void MapClock::receive(InPacket& packet)
++    {
++        if (!state.receive(packet, now_ms()) || loaded) return;
++        // Original v83 field-timer artwork, drawn natively with the map.
++        const auto artwork = nl::nx::ui["UIWindow.img"]["muruengRaid"];
++        frame = artwork["clock"]["0"];
++        colon = artwork["number"]["bar"];
++        for (int i = 0; i < 10; ++i) digits[i] = artwork["number"][std::to_string(i)];
++        loaded = true;
++    }
++
++    void MapClock::draw() const
++    {
++        if (!state.visible()) return;
++        const auto label = state.label(now_ms());
++        const Point<int16_t> center(Constants::viewwidth() / 2, 42);
++        frame.draw(center);
++        int width = 0;
++        for (char c : label) width += c == ':' ? colon.width() : digits[c - '0'].width();
++        int16_t x = center.x() - width / 2;
++        for (char c : label)
++        {
++            const Texture& glyph = c == ':' ? colon : digits[c - '0'];
++            glyph.draw(Point<int16_t>{x + glyph.get_origin().x(), center.y()});
++            x += glyph.width();
++        }
++    }
++}
+diff --git a/src/client/Gameplay/MapleMap/MapClock.h b/src/client/Gameplay/MapleMap/MapClock.h
+new file mode 100644
+--- /dev/null
++++ b/src/client/Gameplay/MapleMap/MapClock.h
+@@ -0,0 +1,20 @@
++#pragma once
++#include "FieldClockState.h"
++#include "../../Graphics/Texture.h"
++#include <array>
++
++namespace jrc
++{
++    class MapClock
++    {
++    public:
++        void receive(InPacket& packet);
++        void clear() { state.clear(); }
++        void draw() const;
++    private:
++        FieldClockState state;
++        Texture frame, colon;
++        std::array<Texture, 10> digits;
++        bool loaded = false;
++    };
++}
+diff --git a/src/client/Gameplay/Stage.cpp b/src/client/Gameplay/Stage.cpp
+--- a/src/client/Gameplay/Stage.cpp
++++ b/src/client/Gameplay/Stage.cpp
+@@ -79,6 +79,7 @@
+         state = INACTIVE;
+         mapid = 0;
+         effect = MapEffect();
++        clock.clear();
+         pending_intro_warp_mapid = -1;
+         pending_intro_warp_delay_ms = 0;
+ 
+@@ -146,6 +147,7 @@
+         portals.draw(viewpos, alpha);
+         backgrounds.drawforegrounds(viewx, viewy, alpha);
+         effect.draw();
++        clock.draw();
+     }
+ 
+     void Stage::update()
+diff --git a/src/client/Gameplay/Stage.h b/src/client/Gameplay/Stage.h
+--- a/src/client/Gameplay/Stage.h
++++ b/src/client/Gameplay/Stage.h
+@@ -22,6 +22,7 @@
+ #include "Combat/Combat.h"
+ #include "MapleMap/MapInfo.h"
+ #include "MapleMap/MapEffect.h"
++#include "MapleMap/MapClock.h"
+ #include "MapleMap/MapTilesObjs.h"
+ #include "MapleMap/MapBackgrounds.h"
+ #include "MapleMap/MapPortals.h"
+@@ -64,6 +65,8 @@
+         void show_character_effect(int32_t cid, CharEffect::Id effect);
+         // Show a map-level field effect.
+         void add_effect(const std::string& path);
++        void set_clock(InPacket& packet) { clock.receive(packet); }
++        void clear_clock() { clock.clear(); }
+         // Schedule a timed map-warp request used by intro scene scripts.
+         void schedule_intro_warp(int32_t mapid, int32_t delay_ms);
+ 
+@@ -136,6 +139,7 @@
+         MapMobs mobs;
+         MapDrops drops;
+         MapEffect effect;
++        MapClock clock;
+ 
+         Combat combat;
+         int32_t pending_intro_warp_mapid;
+diff --git a/src/client/Net/Handlers/Helpers/FieldEffectAssets.h b/src/client/Net/Handlers/Helpers/FieldEffectAssets.h
+new file mode 100644
+--- /dev/null
++++ b/src/client/Net/Handlers/Helpers/FieldEffectAssets.h
+@@ -0,0 +1,20 @@
++#pragma once
++#include "nlnx/node.hpp"
++#include <string>
++
++namespace jrc
++{
++    inline nl::node field_sound(nl::node sound, std::string path)
++    {
++        if (path.compare(0, 6, "Sound/") == 0) path.erase(0, 6);
++        // FIELD_EFFECT sound names are normally relative to Sound/Field.img.
++        const auto field = sound["Field.img"].resolve(path);
++        if (field.data_type() == nl::node::type::audio) return field;
++        const auto slash = path.find('/');
++        if (slash == std::string::npos) return {};
++        std::string file = path.substr(0, slash);
++        if (file.size() < 4 || file.substr(file.size() - 4) != ".img") file += ".img";
++        const auto node = sound[file].resolve(path.substr(slash + 1));
++        return node.data_type() == nl::node::type::audio ? node : nl::node{};
++    }
++}
+diff --git a/src/client/Net/Handlers/SetfieldHandlers.cpp b/src/client/Net/Handlers/SetfieldHandlers.cpp
+--- a/src/client/Net/Handlers/SetfieldHandlers.cpp
++++ b/src/client/Net/Handlers/SetfieldHandlers.cpp
+@@ -20,6 +20,8 @@
+ 
+ #include "Helpers/ItemParser.h"
+ #include "Helpers/LoginParser.h"
++#include "Helpers/FieldEffectAssets.h"
++#include "nlnx/nx.hpp"
+ 
+ #include "../../Console.h"
+ #include "../../Constants.h"
+@@ -341,6 +343,17 @@
+         }
+     }
+ 
++    void ClockHandler::handle(InPacket& recv) const
++    {
++        Stage::get().set_clock(recv);
++    }
++
++    void StopClockHandler::handle(InPacket& recv) const
++    {
++        recv.read_byte();
++        Stage::get().clear_clock();
++    }
++
+     void FieldEffectHandler::handle(InPacket& recv) const
+     {
+         int8_t mode = recv.read_byte();
+@@ -354,6 +367,13 @@
+             }
+ 
+             Stage::get().add_effect(path);
++            return;
++        }
++
++        if (mode == 4)
++        {
++            const auto sound = field_sound(nl::nx::sound, recv.read_string());
++            if (sound) Sound(sound).play();
+             return;
+         }
+ 
+diff --git a/src/client/Net/Handlers/SetfieldHandlers.h b/src/client/Net/Handlers/SetfieldHandlers.h
+--- a/src/client/Net/Handlers/SetfieldHandlers.h
++++ b/src/client/Net/Handlers/SetfieldHandlers.h
+@@ -49,6 +49,18 @@
+         void parse_areainfo(InPacket& recv) const;
+     };
+ 
++    class ClockHandler : public PacketHandler
++    {
++    public:
++        void handle(InPacket& recv) const override;
++    };
++
++    class StopClockHandler : public PacketHandler
++    {
++    public:
++        void handle(InPacket& recv) const override;
++    };
++
+     class FieldEffectHandler : public PacketHandler
+     {
+     public:
+diff --git a/src/client/Net/PacketSwitch.cpp b/src/client/Net/PacketSwitch.cpp
+--- a/src/client/Net/PacketSwitch.cpp
++++ b/src/client/Net/PacketSwitch.cpp
+@@ -104,6 +104,7 @@
+         FIELD_OBSTACLE_LIST    = 140,
+         FIELD_OBSTACLE_RESET   = 141,
+         CLOCK                   = 147,
++        STOP_CLOCK              = 154,
+         LEGACY_FIELD_OBJECT     = 159,
+ 
+         // Mapobject
+@@ -261,6 +262,8 @@
+         emplace<SCRIPT_PROGRESS_MESSAGE, NullHandler>();
+         emplace<RECEIVE_POLICE, NullHandler>();
+         emplace<FIELD_EFFECT, FieldEffectHandler>();
++        emplace<CLOCK, ClockHandler>();
++        emplace<STOP_CLOCK, StopClockHandler>();
+         emplace<FIELD_OBSTACLE_ONOFF, NullHandler>();
+         emplace<FIELD_OBSTACLE_LIST, NullHandler>();
+         emplace<FIELD_OBSTACLE_RESET, NullHandler>();
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -89,6 +89,7 @@
+ 
+ client_test(packet_test unit)
+ client_test(mob_attack_test unit)
++client_test(field_clock_test unit)
+ client_test(cash_shop_test unit)
+ client_test(ui_window_test unit)
+ client_test(job_requirements_test unit)
+@@ -156,7 +157,7 @@
+     add_library(test_texture_capture OBJECT support/texture_capture.cpp)
+     target_link_libraries(test_texture_capture PUBLIC test_asset_support)
+ 
+-    foreach(name king_slime v83_menu_assets cash_shop_assets character_stats equip_requirements npc_buttons npc_dialog npc_notice quest_ui quest_quiz)
++    foreach(name field_clock_assets king_slime v83_menu_assets cash_shop_assets character_stats equip_requirements npc_buttons npc_dialog npc_notice quest_ui quest_quiz)
+         client_test(${name}_test assets test_asset_client test_asset_support)
+     endforeach()
+     foreach(name quest_rules quest_conversation npc_quest_markers)
+diff --git a/tests/field_clock_assets_test.cpp b/tests/field_clock_assets_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/field_clock_assets_test.cpp
+@@ -0,0 +1,37 @@
++#include <doctest/doctest.h>
++#include "support/assets.h"
++#include "client/Net/Handlers/Helpers/FieldEffectAssets.h"
++#include "nlnx/bitmap.hpp"
++
++TEST_CASE("The v83 field clock has its original frame, all digits, and colon")
++{
++    test_support::NxFile ui("UI.nx");
++    const auto art = ui.root()["UIWindow.img"]["muruengRaid"];
++    REQUIRE(art["clock"]["0"].data_type() == nl::node::type::bitmap);
++    CHECK(art["clock"]["0"].get_bitmap().width() == 205);
++    CHECK(art["clock"]["0"].get_bitmap().height() == 53);
++    for (int i = 0; i < 10; ++i)
++    {
++        const auto digit = art["number"][std::to_string(i)];
++        CHECK(digit.data_type() == nl::node::type::bitmap);
++        CHECK(digit.get_bitmap().width() == 21);
++        CHECK(digit.get_bitmap().height() == 28);
++    }
++    CHECK(art["number"]["bar"].data_type() == nl::node::type::bitmap);
++}
++
++TEST_CASE("KPQ clear and wrong packets resolve actual v83 sounds and artwork")
++{
++    test_support::NxFile sound("Sound.nx"), map("Map.nx");
++    for (const auto* name : {"Clear", "Failed"})
++    {
++        CHECK(jrc::field_sound(sound.root(), std::string("Party1/") + name).data_type() == nl::node::type::audio);
++        CHECK(jrc::field_sound(sound.root(), std::string("Sound/Field.img/Party1/") + name).data_type() == nl::node::type::audio);
++    }
++    CHECK_FALSE(jrc::field_sound(sound.root(), "Party1/missing"));
++    for (const auto* name : {"clear", "wrong_kor"})
++    {
++        const auto art = map.root()["Effect.img"]["quest"]["party"][name];
++        REQUIRE(art["0"].data_type() == nl::node::type::bitmap);
++    }
++}
+diff --git a/tests/field_clock_test.cpp b/tests/field_clock_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/field_clock_test.cpp
+@@ -0,0 +1,84 @@
++#include "support/packet_fixture.h"
++#include "client/Gameplay/MapleMap/FieldClockState.h"
++#include "client/Net/PacketError.h"
++
++using jrc::FieldClockState;
++using test_support::PacketFixture;
++
++TEST_CASE("Server CLOCK countdown follows elapsed time rather than rendered frames")
++{
++    PacketFixture packet(147);
++    packet.write_byte(2);
++    packet.write_int(1800);
++    auto input = packet.input();
++    FieldClockState clock;
++    REQUIRE(clock.receive(input, 10'000));
++    CHECK(clock.visible());
++    CHECK(clock.label(10'000) == "30:00");
++    CHECK(clock.label(10'999) == "30:00");
++    CHECK(clock.label(11'000) == "29:59");
++    CHECK(clock.label(75'000) == "28:55"); // Includes a paused renderer/tab.
++    CHECK(clock.label(1'810'000) == "00:00");
++    CHECK(clock.label(1'900'000) == "00:00");
++    CHECK_FALSE(input.available());
++}
++
++TEST_CASE("Stage transitions replace the clock with the server's remaining time")
++{
++    PacketFixture start(147);
++    start.write_byte(2);
++    start.write_int(1800);
++    FieldClockState clock;
++    auto first = start.input();
++    REQUIRE(clock.receive(first, 0));
++    clock.clear(); // SET_FIELD clears old map UI before its CLOCK packet arrives.
++    CHECK_FALSE(clock.visible());
++    PacketFixture next(147);
++    next.write_byte(2);
++    next.write_int(1700);
++    auto input = next.input();
++    REQUIRE(clock.receive(input, 100'000));
++    CHECK(clock.label(100'000) == "28:20");
++    CHECK(clock.label(101'000) == "28:19");
++    clock.clear(); // STOP_CLOCK154 at clear/exit.
++    CHECK_FALSE(clock.visible());
++    CHECK(clock.label(102'000).empty());
++    clock.clear();
++    CHECK_FALSE(clock.visible());
++}
++
++TEST_CASE("Wall clocks roll through midnight and type3 consumes its extra byte")
++{
++    FieldClockState clock;
++    PacketFixture wall(147);
++    wall.write_byte(1); wall.write_byte(23); wall.write_byte(59); wall.write_byte(59);
++    auto time = wall.input();
++    REQUIRE(clock.receive(time, 0));
++    CHECK(clock.label(999) == "23:59:59");
++    CHECK(clock.label(1000) == "00:00:00");
++    PacketFixture special(147);
++    special.write_byte(3); special.write_byte(0); special.write_int(61);
++    auto countdown = special.input();
++    REQUIRE(clock.receive(countdown, 2000));
++    CHECK(clock.label(2000) == "01:01");
++    CHECK_FALSE(countdown.available());
++}
++
++TEST_CASE("Truncated clock packets leave the previous server deadline intact")
++{
++    FieldClockState clock;
++    PacketFixture start(147);
++    start.write_byte(2); start.write_int(60);
++    auto valid = start.input();
++    REQUIRE(clock.receive(valid, 0));
++    PacketFixture broken(147);
++    broken.write_byte(2); broken.write_short(30);
++    auto input = broken.input();
++    CHECK_THROWS_AS(clock.receive(input, 10'000), jrc::PacketError);
++    CHECK(clock.label(10'000) == "00:50");
++    PacketFixture unknown(147);
++    unknown.write_byte(127);
++    auto other = unknown.input();
++    CHECK_FALSE(clock.receive(other, 10'000));
++    CHECK(clock.label(10'000) == "00:50");
++}

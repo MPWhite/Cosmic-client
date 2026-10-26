@@ -1,0 +1,574 @@
+diff --git a/src/client/Gameplay/MapleMap/MapMobs.cpp b/src/client/Gameplay/MapleMap/MapMobs.cpp
+--- a/src/client/Gameplay/MapleMap/MapMobs.cpp
++++ b/src/client/Gameplay/MapleMap/MapMobs.cpp
+@@ -94,7 +94,7 @@
+         }
+     }
+ 
+-    void MapMobs::send_movement(int32_t oid, Point<int16_t> start, std::vector<Movement>&& movements)
++    void MapMobs::send_movement(int32_t oid, Point<int16_t> start, std::vector<Movement>&& movements, int8_t activity)
+     {
+         if (Optional<Mob> mob = mobs.get(oid))
+         {
+@@ -102,6 +102,7 @@
+                 start,
+                 std::move(movements)
+             );
++            if (activity == 24 || activity == 25) mob->start_attack(false);
+         }
+     }
+ 
+@@ -233,6 +234,18 @@
+         }
+     }
+ 
++    MobAttack MapMobs::take_attack(Point<int16_t> feet, bool grounded)
++    {
++        MobAttack result;
++        for (const auto& entry : mobs)
++        {
++            auto* mob = static_cast<Mob*>(entry.second.get());
++            MobAttack attack = mob->take_attack(feet, grounded);
++            if (attack && !result) result = attack;
++        }
++        return result;
++    }
++
+     Point<int16_t> MapMobs::get_mob_position(int32_t oid) const
+     {
+         if (auto mob = mobs.get(oid))
+diff --git a/src/client/Gameplay/MapleMap/MapMobs.h b/src/client/Gameplay/MapleMap/MapMobs.h
+--- a/src/client/Gameplay/MapleMap/MapMobs.h
++++ b/src/client/Gameplay/MapleMap/MapMobs.h
+@@ -48,7 +48,7 @@
+         // Update a mob's hp display.
+         void send_mobhp(int32_t oid, int8_t percent, uint16_t playerlevel);
+         // Update a mob's movements.
+-        void send_movement(int32_t oid, Point<int16_t> start, std::vector<Movement>&& movements);
++        void send_movement(int32_t oid, Point<int16_t> start, std::vector<Movement>&& movements, int8_t activity);
+ 
+         // Calculate the results of an attack.
+         AttackResult send_attack(const Attack& attack);
+@@ -62,6 +62,7 @@
+         int32_t find_colliding(const MovingObject& moveobj) const;
+         // Create an attack by the specified mob.
+         MobAttack create_attack(int32_t oid) const;
++        MobAttack take_attack(Point<int16_t> feet, bool grounded);
+         // Return the position of a mob.
+         Point<int16_t> get_mob_position(int32_t oid) const;
+         // Return the body-center position used for combat targeting.
+diff --git a/src/client/Gameplay/MapleMap/Mob.cpp b/src/client/Gameplay/MapleMap/Mob.cpp
+--- a/src/client/Gameplay/MapleMap/Mob.cpp
++++ b/src/client/Gameplay/MapleMap/Mob.cpp
+@@ -187,12 +187,35 @@
+             animations[DIE] = animations[MOVE];
+         }
+ 
++        // King Slime's ordinary stomp uses the original attack1 frames and
++        // timing/range from Mob.wz; other monster skill families stay unchanged.
++        const nl::node attacksrc = animsrc["attack1"];
++        const nl::node attackinfo = src["attack1"]["info"];
++        if (mid == 9300003 && attacksrc["0"] && attackinfo["range"])
++        {
++            animations[ATTACK1] = attacksrc;
++            attack_range = attackinfo["range"];
++            attack_power = attackinfo["PADamage"].get_integer(watk);
++            attack_ground_only = attackinfo["jumpAttack"].get_bool();
++            attack_effect_after = attackinfo["effectAfter"].get_integer(0);
++            attack_has_effect = attackinfo["effect"]["0"].size() > 0;
++            if (attack_has_effect) attack_effect = attackinfo["effect"];
++            int32_t duration = 0;
++            for (auto frame : attacksrc)
++            {
++                if (frame.data_type() == nl::node::type::bitmap)
++                    duration += std::max<int32_t>(1, frame["delay"].get_integer(100));
++            }
++            attack_timeline.configure(attackinfo["attackAfter"].get_integer(900), duration);
++        }
++
+         name = nl::nx::string["Mob.img"][std::to_string(mid)]["name"].get_string();
+ 
+         nl::node sndsrc = nl::nx::sound["Mob.img"][strid];
+ 
+         hitsound = sndsrc["Damage"];
+         diesound = sndsrc["Die"];
++        attack_sound = sndsrc["Attack1"];
+ 
+         speed += 100;
+         speed *= 0.001f;
+@@ -285,6 +308,12 @@
+             return phobj.fhlayer;
+         }
+ 
++        attack_timeline.update(Constants::TIMESTEP);
++        if (engaged && attack_cooldown > 0) attack_cooldown -= Constants::TIMESTEP;
++        if (control && engaged && !dying && phobj.onground && attack_cooldown <= 0
++            && animations.count(ATTACK1) && !attack_timeline.is_active())
++            start_attack(true);
++
+         bool aniend = animations.at(stance).update();
+         if (aniend && stance == DIE)
+         {
+@@ -322,6 +351,26 @@
+ 
+         if (!dying)
+         {
++            if (stance == ATTACK1)
++            {
++                const int32_t previous = attack_elapsed;
++                attack_elapsed += Constants::TIMESTEP;
++                if (attack_has_effect && previous < attack_effect_after
++                    && attack_elapsed >= attack_effect_after)
++                    effects.add(attack_effect, DrawArgument(Point<int16_t>{}, flip && !noflip));
++                // The WZ frames contain the leap. Keep the feet/origin fixed so
++                // hit geometry and the server's delayed impact agree.
++                phobj.hspeed = phobj.vspeed = phobj.hforce = phobj.vforce = 0;
++                phobj.normalize();
++                physics.get_fht().update_fh(phobj);
++                if (!attack_timeline.is_active())
++                {
++                    set_stance(STAND);
++                    counter = 0;
++                    if (control) update_movement();
++                }
++                return phobj.fhlayer;
++            }
+             if (!canfly)
+             {
+                 if (phobj.is_flag_not_set(PhysicsObject::TURNATEDGES))
+@@ -468,7 +517,7 @@
+             oid,
+             1, 0, 0, 0, 0, 0, 0,
+             get_position(),
+-            Movement(phobj, value_of(stance, flip))
++            Movement(phobj, value_of(stance == ATTACK1 ? STAND : stance, flip))
+         ).dispatch();
+     }
+ 
+@@ -527,7 +576,7 @@
+         const Movement& lastmove = movements.front();
+ 
+         uint8_t laststance = lastmove.newstate;
+-        set_stance(laststance);
++        if (!attack_timeline.is_active()) set_stance(laststance);
+ 
+         phobj.fhid = lastmove.fh;
+     }
+@@ -757,12 +806,13 @@
+     void Mob::apply_damage(int32_t damage, bool toleft)
+     {
+         hitsound.play();
++        if (damage > 0) engaged = true;
+ 
+         if (dying && stance != DIE)
+         {
+             apply_death();
+         }
+-        else if (control && is_alive() && damage >= knockback)
++        else if (control && is_alive() && damage >= knockback && stance != ATTACK1)
+         {
+             flip = toleft;
+             counter = 170;
+@@ -786,8 +836,35 @@
+         return { attack, get_position(), id, oid };
+     }
+ 
++    void Mob::start_attack(bool notify_server)
++    {
++        if (!is_alive() || !animations.count(ATTACK1) || !attack_timeline.start()) return;
++        attack_origin = get_position();
++        attack_elapsed = 0;
++        attack_cooldown = randomizer.next_int(5000, 8500);
++        phobj.hspeed = phobj.vspeed = phobj.hforce = phobj.vforce = 0;
++        set_stance(ATTACK1);
++        attack_sound.play();
++        if (notify_server)
++        {
++            // v83 action encoding is shared with MoveLifeHandler on the server.
++            MoveMobPacket(oid, 1, 0, flip ? 24 : 25, 0, 0, 0, 0, attack_origin,
++                Movement(phobj, value_of(STAND, flip))).dispatch();
++        }
++    }
++
++    MobAttack Mob::take_attack(Point<int16_t> feet, bool grounded)
++    {
++        if (!attack_timeline.take_impact() || !is_alive()) return {};
++        const auto range = MobAttackTimeline::world_range(attack_range, attack_origin, flip && !noflip);
++        if (!MobAttackTimeline::hits(range, feet, attack_ground_only, grounded)) return {};
++        return {randomizer.next_int(static_cast<int32_t>(attack_power * 0.8f), attack_power),
++            attack_origin, id, oid};
++    }
++
+     void Mob::apply_death()
+     {
++        attack_timeline.cancel();
+         set_stance(DIE);
+         diesound.play();
+         dying = true;
+diff --git a/src/client/Gameplay/MapleMap/Mob.h b/src/client/Gameplay/MapleMap/Mob.h
+--- a/src/client/Gameplay/MapleMap/Mob.h
++++ b/src/client/Gameplay/MapleMap/Mob.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include "LivingObject.h"
++#include "MobAttackTimeline.h"
+ 
+ #include "../Combat/Attack.h"
+ #include "../Combat/Bullet.h"
+@@ -22,21 +23,22 @@
+     class Mob : public LivingObject
+     {
+     public:
+-        static const size_t NUM_STANCES = 6;
++        static const size_t NUM_STANCES = 7;
+         enum Stance : uint8_t
+         {
+             MOVE  = 2,
+             STAND = 4,
+             JUMP  = 6,
+             HIT   = 8,
+-            DIE   = 10
++            DIE   = 10,
++            ATTACK1 = 14
+         };
+ 
+         static std::string nameof(Stance stance)
+         {
+             static const std::string stancenames[NUM_STANCES] =
+             {
+-                "move", "stand", "jump", "hit1", "die1", "fly"
++                "move", "stand", "jump", "hit1", "die1", "fly", "attack1"
+             };
+             size_t index = (stance - 1) / 2;
+             return stancenames[index];
+@@ -84,6 +86,8 @@
+ 
+         /// Create a touch damage attack to the player.
+         MobAttack create_touch_attack() const;
++        MobAttack take_attack(Point<int16_t> feet, bool grounded);
++        void start_attack(bool notify_server);
+ 
+         /// Check if this mob collides with the specified rectangle.
+         bool is_in_range(const Rectangle<int16_t>& range) const;
+@@ -134,6 +138,18 @@
+         Rectangle<int16_t> get_bounds(Point<int16_t> position) const;
+ 
+         std::map<Stance, Animation> animations;
++        MobAttackTimeline attack_timeline;
++        Rectangle<int16_t> attack_range;
++        Point<int16_t> attack_origin;
++        Animation attack_effect;
++        Sound attack_sound;
++        int32_t attack_power = 0;
++        int32_t attack_cooldown = 6000;
++        int32_t attack_effect_after = 0;
++        int32_t attack_elapsed = 0;
++        bool attack_has_effect = false;
++        bool attack_ground_only = false;
++        bool engaged = false;
+         std::string name;
+         Sound hitsound;
+         Sound diesound;
+diff --git a/src/client/Gameplay/MapleMap/MobAttackTimeline.h b/src/client/Gameplay/MapleMap/MobAttackTimeline.h
+new file mode 100644
+--- /dev/null
++++ b/src/client/Gameplay/MapleMap/MobAttackTimeline.h
+@@ -0,0 +1,69 @@
++#pragma once
++#include "../../Template/Rectangle.h"
++#include <algorithm>
++#include <cstdint>
++
++namespace jrc
++{
++    // WZ attackAfter and frame delays use milliseconds. An impact is available
++    // for precisely one simulation step, even if the player is invulnerable.
++    class MobAttackTimeline
++    {
++    public:
++        void configure(int32_t impact_delay, int32_t duration)
++        {
++            impact_after = std::max(1, impact_delay);
++            animation_duration = std::max(impact_after, duration);
++        }
++
++        bool start()
++        {
++            if (active || impact_after <= 0) return false;
++            elapsed = 0;
++            active = true;
++            impact = false;
++            return true;
++        }
++
++        void update(int32_t milliseconds)
++        {
++            impact = false;
++            if (!active || milliseconds <= 0) return;
++            const int32_t previous = elapsed;
++            elapsed += milliseconds;
++            impact = previous < impact_after && elapsed >= impact_after;
++            if (elapsed >= animation_duration) active = false;
++        }
++
++        void cancel() { active = false; impact = false; }
++        bool is_active() const { return active; }
++        bool take_impact()
++        {
++            const bool result = impact;
++            impact = false;
++            return result;
++        }
++
++        static Rectangle<int16_t> world_range(Rectangle<int16_t> range,
++            Point<int16_t> origin, bool facing_right)
++        {
++            if (facing_right) range = {-range.r(), -range.l(), range.t(), range.b()};
++            range.shift(origin);
++            return range;
++        }
++
++        static bool hits(const Rectangle<int16_t>& range, Point<int16_t> feet,
++            bool ground_attack, bool grounded)
++        {
++            if (ground_attack && !grounded) return false;
++            return range.overlaps({feet.x() - 12, feet.x() + 12, feet.y() - 48, feet.y()});
++        }
++
++    private:
++        int32_t impact_after = 0;
++        int32_t animation_duration = 0;
++        int32_t elapsed = 0;
++        bool active = false;
++        bool impact = false;
++    };
++}
+diff --git a/src/client/Gameplay/Stage.cpp b/src/client/Gameplay/Stage.cpp
+--- a/src/client/Gameplay/Stage.cpp
++++ b/src/client/Gameplay/Stage.cpp
+@@ -179,8 +179,16 @@
+         portals.update(player.get_position());
+         camera.update(player.get_position());
+ 
++        MobAttack mob_attack = mobs.take_attack(player.get_position(), player.get_phobj().onground);
+         if (player.is_invincible())
+         {
++            return;
++        }
++
++        if (mob_attack)
++        {
++            const MobAttackResult result = player.damage(mob_attack);
++            TakeDamagePacket(0, 0, result.damage, result.mobid, result.oid, result.direction).dispatch();
+             return;
+         }
+ 
+diff --git a/src/client/Net/Handlers/MapObjectHandlers.cpp b/src/client/Net/Handlers/MapObjectHandlers.cpp
+--- a/src/client/Net/Handlers/MapObjectHandlers.cpp
++++ b/src/client/Net/Handlers/MapObjectHandlers.cpp
+@@ -374,7 +374,7 @@
+ 
+         recv.read_byte();
+         recv.read_byte(); // useskill
+-        recv.read_byte(); // skill
++        int8_t activity = recv.read_byte();
+         recv.read_byte(); // skill 1
+         recv.read_byte(); // skill 2
+         recv.read_byte(); // skill 3
+@@ -383,7 +383,7 @@
+         Point<int16_t> position = recv.read_point();
+         std::vector<Movement> movements = MovementParser::parse_movements(recv);
+ 
+-        Stage::get().get_mobs().send_movement(oid, position, std::move(movements));
++        Stage::get().get_mobs().send_movement(oid, position, std::move(movements), activity);
+     }
+ 
+ 
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -88,6 +88,7 @@
+ endfunction()
+ 
+ client_test(packet_test unit)
++client_test(mob_attack_test unit)
+ client_test(cash_shop_test unit)
+ client_test(ui_window_test unit)
+ client_test(job_requirements_test unit)
+@@ -97,7 +98,7 @@
+ client_test(viewport_camera_test unit)
+ 
+ if(TEST_ASSETS)
+-    foreach(asset Character Etc Item Npc Quest String UI UI_83)
++    foreach(asset Character Etc Item Mob Npc Quest String UI UI_83)
+         if(NOT EXISTS "${TEST_ASSET_DIR}/${asset}.nx")
+             message(FATAL_ERROR "Asset tests require ${TEST_ASSET_DIR}/${asset}.nx. Set TEST_ASSET_DIR to an existing asset directory, or configure with TEST_ASSETS=OFF.")
+         endif()
+@@ -155,7 +156,7 @@
+     add_library(test_texture_capture OBJECT support/texture_capture.cpp)
+     target_link_libraries(test_texture_capture PUBLIC test_asset_support)
+ 
+-    foreach(name v83_menu_assets cash_shop_assets character_stats equip_requirements npc_buttons npc_dialog npc_notice quest_ui quest_quiz)
++    foreach(name king_slime v83_menu_assets cash_shop_assets character_stats equip_requirements npc_buttons npc_dialog npc_notice quest_ui quest_quiz)
+         client_test(${name}_test assets test_asset_client test_asset_support)
+     endforeach()
+     foreach(name quest_rules quest_conversation npc_quest_markers)
+diff --git a/tests/king_slime_test.cpp b/tests/king_slime_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/king_slime_test.cpp
+@@ -0,0 +1,38 @@
++#include <doctest/doctest.h>
++#include "support/assets.h"
++#include "client/Gameplay/MapleMap/MobAttackTimeline.h"
++
++TEST_CASE("KPQ King Slime attack metadata agrees with the playable slam")
++{
++    const test_support::NxFile mobs("Mob.nx");
++    const auto attack = mobs.root()["9300003.img"]["attack1"];
++    const auto info = attack["info"];
++    REQUIRE(attack["0"].data_type() == nl::node::type::bitmap);
++    CHECK(info["attackAfter"].get_integer() == 900);
++    CHECK(info["effectAfter"].get_integer() == 300);
++    CHECK(info["PADamage"].get_integer() == 165);
++    CHECK(info["jumpAttack"].get_bool());
++    const jrc::Rectangle<int16_t> range(info["range"]);
++    CHECK(range.l() == -250);
++    CHECK(range.r() == 250);
++    CHECK(range.t() == -150);
++    CHECK(range.b() == 0);
++    int duration = 0, frames = 0;
++    for (auto frame : attack)
++    {
++        if (frame.data_type() == nl::node::type::bitmap)
++        {
++            ++frames;
++            duration += frame["delay"].get_integer(100);
++        }
++    }
++    CHECK(frames == 8);
++    CHECK(duration == 1500);
++    jrc::MobAttackTimeline timeline;
++    timeline.configure(info["attackAfter"].get_integer(), duration);
++    REQUIRE(timeline.start());
++    timeline.update(899);
++    CHECK_FALSE(timeline.take_impact());
++    timeline.update(1);
++    CHECK(timeline.take_impact());
++}
+diff --git a/tests/mob_attack_test.cpp b/tests/mob_attack_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/mob_attack_test.cpp
+@@ -0,0 +1,111 @@
++#include <doctest/doctest.h>
++#include "client/Gameplay/MapleMap/MobAttackTimeline.h"
++
++using jrc::MobAttackTimeline;
++using jrc::Point;
++using jrc::Rectangle;
++
++TEST_CASE("King Slime's windup deals one impact at the WZ delay")
++{
++    MobAttackTimeline attack;
++    attack.configure(900, 1500);
++    REQUIRE(attack.start());
++    for (int tick = 0; tick < 112; ++tick)
++    {
++        attack.update(8);
++        CHECK_FALSE(attack.take_impact());
++    }
++    attack.update(8);
++    CHECK(attack.take_impact());
++    CHECK_FALSE(attack.take_impact());
++    CHECK(attack.is_active());
++    CHECK_FALSE(attack.start());
++    attack.update(596);
++    CHECK_FALSE(attack.is_active());
++    CHECK_FALSE(attack.take_impact());
++}
++
++TEST_CASE("Invulnerability cannot defer a missed stomp into a later hit")
++{
++    MobAttackTimeline attack;
++    attack.configure(900, 1500);
++    REQUIRE(attack.start());
++    attack.update(904); // invulnerable player does not consume this impact
++    attack.update(8);
++    CHECK_FALSE(attack.take_impact());
++    CHECK(attack.is_active());
++}
++
++TEST_CASE("Monster death cancels an attack during its windup")
++{
++    MobAttackTimeline attack;
++    attack.configure(900, 1500);
++    REQUIRE(attack.start());
++    attack.update(800);
++    attack.cancel();
++    attack.update(200);
++    CHECK_FALSE(attack.take_impact());
++    CHECK_FALSE(attack.is_active());
++}
++
++TEST_CASE("King Slime's ground slam respects range, floors, and jump dodges")
++{
++    const auto range = MobAttackTimeline::world_range({-250, 250, -150, 0}, {100, -435}, false);
++    CHECK(MobAttackTimeline::hits(range, {340, -435}, true, true));
++    CHECK_FALSE(MobAttackTimeline::hits(range, {363, -435}, true, true));
++    CHECK_FALSE(MobAttackTimeline::hits(range, {100, -743}, true, true));
++    CHECK_FALSE(MobAttackTimeline::hits(range, {100, -470}, true, false));
++    CHECK(MobAttackTimeline::hits(range, {100, -470}, false, false));
++}
++
++TEST_CASE("Directional WZ hit boxes mirror around monster feet")
++{
++    const Rectangle<int16_t> local{-180, 40, -90, 0};
++    const auto left = MobAttackTimeline::world_range(local, {100, 30}, false);
++    const auto right = MobAttackTimeline::world_range(local, {100, 30}, true);
++    CHECK(left.l() == -80);
++    CHECK(left.r() == 140);
++    CHECK(right.l() == 60);
++    CHECK(right.r() == 280);
++    CHECK(right.t() == -60);
++    CHECK(right.b() == 30);
++}
++
++#include "client/Net/InPacket.h"
++#include "client/Net/Packets/GameplayPackets.h"
++#include "client/Net/Packets/AttackAndSkillPackets.h"
++
++TEST_CASE("King Slime attack packets retain v83 action and physical movement fields")
++{
++    const jrc::Movement movement(jrc::Movement::_ABSOLUTE, 0, 100, -435, 0, 0, 19, 4, 1);
++    const jrc::MoveMobPacket packet(123, 1, 0, 24, 0, 0, 0, 0, {100, -435}, movement);
++    jrc::InPacket input(packet.data().data() + 2, packet.data().size() - 2);
++    CHECK(input.read_int() == 123);
++    CHECK(input.read_short() == 1);
++    CHECK(input.read_byte() == 0);
++    CHECK(input.read_byte() == 24); // attack1 wire byte, decoded action12
++    input.skip(17); // skill fields, options, and reserved movement preamble
++    CHECK(input.read_point() == Point<int16_t>(100, -435));
++    CHECK(input.read_byte() == 1);
++    CHECK(input.read_byte() == 0);
++    CHECK(input.read_point() == Point<int16_t>(100, -435));
++    input.skip(4);
++    CHECK(input.read_short() == 19);
++    CHECK(input.read_byte() == 4); // animation is separate from ground stance
++    CHECK(input.read_short() == 1);
++    CHECK_FALSE(input.available());
++}
++
++TEST_CASE("Slam damage reports ordinary attack index zero rather than contact")
++{
++    const jrc::TakeDamagePacket packet(0, 0, 97, 9300003, 123, 1);
++    jrc::InPacket input(packet.data().data() + 2, packet.data().size() - 2);
++    input.skip(4); // client timestamp
++    CHECK(input.read_byte() == 0);
++    CHECK(input.read_byte() == 0);
++    CHECK(input.read_int() == 97);
++    CHECK(input.read_int() == 9300003);
++    CHECK(input.read_int() == 123);
++    CHECK(input.read_byte() == 1);
++    CHECK_FALSE(input.available());
++}

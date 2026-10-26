@@ -1,0 +1,105 @@
+diff --git a/src/client/Gameplay/NpcServices.h b/src/client/Gameplay/NpcServices.h
+new file mode 100644
+--- /dev/null
++++ b/src/client/Gameplay/NpcServices.h
+@@ -0,0 +1,13 @@
++#pragma once
++
++#include <cstdint>
++
++namespace jrc::NpcServices
++{
++    // These server NPC scripts also exist in asset revisions without script
++    // metadata. Their party-quest service must stay reachable beside record quests.
++    constexpr bool has_kpq_service(int32_t npcid)
++    {
++        return npcid == 9020000 || npcid == 9020001 || npcid == 9020002;
++    }
++}
+diff --git a/src/client/Gameplay/MapleMap/Npc.cpp b/src/client/Gameplay/MapleMap/Npc.cpp
+--- a/src/client/Gameplay/MapleMap/Npc.cpp
++++ b/src/client/Gameplay/MapleMap/Npc.cpp
+@@ -17,6 +17,7 @@
+ //////////////////////////////////////////////////////////////////////////////
+ //#pragma once
+ #include "Npc.h"
++#include "../NpcServices.h"
+ 
+ #include "nlnx/node.hpp"
+ #include "nlnx/nx.hpp"
+@@ -51,7 +52,7 @@
+ 
+         hidename  = info["hideName"].get_bool();
+         mouseonly = info["talkMouseOnly"].get_bool();
+-        scripted  = info["script"].size() > 0 || info["shop"].get_bool();
++        scripted  = info["script"].size() > 0 || info["shop"].get_bool() || NpcServices::has_kpq_service(id);
+ 
+         for (const auto& npcnode : src)
+         {
+diff --git a/src/client/Gameplay/QuestConversation.cpp b/src/client/Gameplay/QuestConversation.cpp
+--- a/src/client/Gameplay/QuestConversation.cpp
++++ b/src/client/Gameplay/QuestConversation.cpp
+@@ -1,4 +1,5 @@
+ #include "QuestConversation.h"
++#include "NpcServices.h"
+ 
+ #include "../Data/QuestData.h"
+ 
+@@ -53,9 +54,10 @@
+             return left.action < right.action;
+         });
+ 
+-        // A lone quest opens directly, including progress conversations. NPC
+-        // services belong after the quest choices when a chooser is needed.
+-        if (result.options.size() > 1 && has_services)
++        // Ordinary lone quests open directly. KPQ also has a distinct server
++        // service, which must not be hidden by its record or progress quest.
++        if (!result.options.empty() && has_services
++            && (result.options.size() > 1 || NpcServices::has_kpq_service(npcid)))
+             result.options.push_back({0, Action::TALK, Questlog::Eligibility::AVAILABLE});
+         return result;
+     }
+diff --git a/tests/npc_quest_markers_test.cpp b/tests/npc_quest_markers_test.cpp
+--- a/tests/npc_quest_markers_test.cpp
++++ b/tests/npc_quest_markers_test.cpp
+@@ -4,6 +4,7 @@
+ #include "client/Character/Inventory/Inventory.h"
+ #include "client/Character/QuestLog.h"
+ #include "client/Gameplay/MapleMap/Npc.h"
++#include "client/Gameplay/QuestConversation.h"
+ #include "nlnx/nx.hpp"
+ 
+ #include <vector>
+@@ -207,3 +208,32 @@
+         REQUIRE_MESSAGE((!npc.inrange(center(original_bounds), {})), "Despawned NPCs must not retain clickable markers");
+     }
+ }
++
++TEST_CASE("KPQ services remain reachable alongside Lakelis record quests")
++{
++    test_support::InventoryFixture inventory_state;
++    test_support::NxFile npc_file("Npc.nx", nl::nx::npc);
++    test_support::NxFile strings("String.nx", nl::nx::string);
++    test_support::NxFile quest_file("Quest.nx", nl::nx::quest);
++    const jrc::Inventory inventory;
++    const jrc::Questlog quests;
++    using Conversation = jrc::QuestConversation;
++
++    for (int32_t id : {9020000, 9020001, 9020002})
++    {
++        jrc::Npc npc(id, 42, false, 0, false, {400, 350});
++        CHECK_MESSAGE(npc.isscripted(), "KPQ entry, stage and exit scripts must be available with all asset revisions");
++    }
++
++    jrc::Npc lakelis(9020000, 42, false, 0, false, {400, 350});
++    const auto conversation = Conversation::build(9020000, lakelis.isscripted(), quests, 25, 200, inventory, 103000000);
++    REQUIRE_MESSAGE(!conversation.options.empty(), "The real assets must expose the KPQ record quest");
++    CHECK(conversation.route() == Conversation::Route::MENU);
++    CHECK(conversation.options.back().action == Conversation::Action::TALK);
++    CHECK(std::any_of(conversation.options.begin(), conversation.options.end(), [](const auto& option) {
++        return option.action != Conversation::Action::TALK;
++    }));
++
++    // NPCs with no available quests retain normal direct service routing.
++    CHECK(Conversation::build(9020001, true, quests, 25, 200, inventory, 103000800).route() == Conversation::Route::NPC);
++}

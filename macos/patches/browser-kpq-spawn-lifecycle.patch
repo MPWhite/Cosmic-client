@@ -1,0 +1,206 @@
+diff --git a/src/client/Gameplay/MapleMap/MapChars.cpp b/src/client/Gameplay/MapleMap/MapChars.cpp
+--- a/src/client/Gameplay/MapleMap/MapChars.cpp
++++ b/src/client/Gameplay/MapleMap/MapChars.cpp
+@@ -1,4 +1,6 @@
+ #include "MapChars.h"
++
++#include <algorithm>
+ 
+ namespace jrc
+ {
+@@ -9,17 +11,12 @@
+ 
+     void MapChars::update(const Physics& physics)
+     {
+-        for (; !spawns.empty(); spawns.pop())
++        for (; !spawns.empty(); spawns.pop_front())
+         {
+             const CharSpawn& spawn = spawns.front();
+ 
+             int32_t cid = spawn.get_cid();
+-            Optional<OtherChar> ochar = get_char(cid);
+-            if (ochar)
+-            {
+-
+-            }
+-            else
++            if (!chars.contains(cid))
+             {
+                 chars.add(
+                     spawn.instantiate()
+@@ -32,18 +29,25 @@
+ 
+     void MapChars::spawn(CharSpawn&& spawn)
+     {
+-        spawns.emplace(
++        spawns.emplace_back(
+             std::move(spawn)
+         );
+     }
+ 
+     void MapChars::remove(int32_t cid)
+     {
++        // Network spawn/remove packets can arrive before the next simulation
++        // update. A despawn cancels queued appearances as well as visible ones.
++        spawns.erase(std::remove_if(spawns.begin(), spawns.end(), [cid](const CharSpawn& spawn) {
++            return spawn.get_cid() == cid;
++        }), spawns.end());
+         chars.remove(cid);
+     }
+ 
+     void MapChars::clear()
+     {
++        // A new field must never instantiate the previous field's queued actors.
++        spawns.clear();
+         chars.clear();
+     }
+ 
+diff --git a/src/client/Gameplay/MapleMap/MapChars.h b/src/client/Gameplay/MapleMap/MapChars.h
+--- a/src/client/Gameplay/MapleMap/MapChars.h
++++ b/src/client/Gameplay/MapleMap/MapChars.h
+@@ -6,7 +6,7 @@
+ 
+ #include "../../Character/OtherChar.h"
+ 
+-#include <queue>
++#include <deque>
+ 
+ namespace jrc
+ {
+@@ -50,6 +50,6 @@
+     private:
+         MapObjects chars;
+ 
+-        std::queue<CharSpawn> spawns;
++        std::deque<CharSpawn> spawns;
+     };
+ }
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -169,3 +169,10 @@
+         client_test(${name}_test assets test_texture_capture test_asset_client test_asset_support)
+     endforeach()
+ endif()
++
++# Exercise packet ordering through the real pending-spawn and map registries.
++client_test(map_chars_lifecycle_test unit)
++target_sources(map_chars_lifecycle_test PRIVATE
++    "${CLIENT}/Gameplay/MapleMap/MapChars.cpp"
++    "${CLIENT}/Gameplay/MapleMap/MapObjects.cpp"
++    "${CLIENT}/Gameplay/MapleMap/MapObject.cpp")
+diff --git a/tests/map_chars_lifecycle_test.cpp b/tests/map_chars_lifecycle_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/map_chars_lifecycle_test.cpp
+@@ -0,0 +1,110 @@
++#include <doctest/doctest.h>
++#include "client/Gameplay/MapleMap/MapChars.h"
++
++#include <vector>
++
++namespace
++{
++    std::vector<int32_t> instantiated;
++
++    class RenderlessCharacter : public jrc::MapObject
++    {
++    public:
++        RenderlessCharacter(int32_t cid, jrc::Point<int16_t> position) : MapObject(cid, position) {}
++        void draw(double, double, float) const override {}
++        int8_t update(const jrc::Physics&) override { return 0; }
++        int8_t get_layer() const override { return 0; }
++    };
++
++    jrc::CharSpawn spawn(int32_t cid, int16_t x = 0)
++    {
++        return {cid, {}, 25, 100, "Teammate", 4, {x, 100}};
++    }
++}
++
++namespace jrc
++{
++    // Replace the rendering/physics boundary only. The production MapChars and
++    // MapObjects own queue ordering, duplicate handling and materialized state.
++    CharSpawn::CharSpawn(int32_t c, const LookEntry& lk, uint8_t l, int16_t j,
++        const std::string& nm, int8_t st, Point<int16_t> p)
++        : cid(c), level(l), job(j), name(nm), stance(st), position(p), look(lk) {}
++    int32_t CharSpawn::get_cid() const { return cid; }
++    std::unique_ptr<MapObject> CharSpawn::instantiate() const
++    {
++        instantiated.push_back(cid);
++        return std::make_unique<RenderlessCharacter>(cid, position);
++    }
++    Physics::Physics() {}
++    Footholdtree::Footholdtree() {}
++    Foothold::Foothold() {}
++    void Physics::move_object(PhysicsObject&) const {}
++}
++
++TEST_CASE("A despawn before the next update cancels all queued appearances of that character")
++{
++    instantiated.clear();
++    jrc::MapChars characters;
++    jrc::Physics physics;
++    characters.spawn(spawn(1));
++    characters.spawn(spawn(2));
++    characters.spawn(spawn(1, 50));
++    characters.spawn(spawn(3));
++    characters.remove(1);
++    characters.update(physics);
++    CHECK_FALSE(characters.get_chars()->contains(1));
++    CHECK(characters.get_chars()->contains(2));
++    CHECK(characters.get_chars()->contains(3));
++    CHECK(instantiated == std::vector<int32_t>{2, 3});
++}
++
++TEST_CASE("Field clear discards pending and materialized characters before the next update")
++{
++    instantiated.clear();
++    jrc::MapChars characters;
++    jrc::Physics physics;
++    characters.spawn(spawn(1));
++    characters.update(physics);
++    characters.spawn(spawn(2));
++    characters.clear();
++    characters.update(physics);
++    CHECK(characters.get_chars()->size() == 0);
++    CHECK(instantiated == std::vector<int32_t>{1});
++    characters.spawn(spawn(2, 75));
++    characters.update(physics);
++    REQUIRE(characters.get_chars()->get(2));
++    CHECK(characters.get_chars()->get(2)->get_position().x() == 75);
++}
++
++TEST_CASE("A later spawn after removal is legitimate and retains packet order")
++{
++    instantiated.clear();
++    jrc::MapChars characters;
++    jrc::Physics physics;
++    characters.spawn(spawn(1, 10));
++    characters.spawn(spawn(2, 20));
++    characters.remove(1);
++    characters.spawn(spawn(1, 30));
++    characters.update(physics);
++    CHECK(instantiated == std::vector<int32_t>{2, 1});
++    REQUIRE(characters.get_chars()->get(1));
++    CHECK(characters.get_chars()->get(1)->get_position().x() == 30);
++    characters.remove(1);
++    CHECK_FALSE(characters.get_chars()->contains(1));
++    characters.spawn(spawn(1, 40));
++    characters.update(physics);
++    CHECK(characters.get_chars()->get(1)->get_position().x() == 40);
++}
++
++TEST_CASE("Duplicate spawn packets do not materialize a second character")
++{
++    instantiated.clear();
++    jrc::MapChars characters;
++    jrc::Physics physics;
++    characters.spawn(spawn(1, 10));
++    characters.spawn(spawn(1, 20));
++    characters.update(physics);
++    CHECK(characters.get_chars()->size() == 1);
++    CHECK(instantiated == std::vector<int32_t>{1});
++    CHECK(characters.get_chars()->get(1)->get_position().x() == 10);
++}

@@ -1,0 +1,94 @@
+diff --git a/src/client/Gameplay/Physics/Foothold.cpp b/src/client/Gameplay/Physics/Foothold.cpp
+--- a/src/client/Gameplay/Physics/Foothold.cpp
++++ b/src/client/Gameplay/Physics/Foothold.cpp
+@@ -130,7 +130,10 @@
+ 
+     bool Foothold::is_blocking(const Range<int16_t>& vertical) const
+     {
+-        return is_wall() && m_vertical.overlaps(vertical);
++        // WZ footholds preserve traversal direction: a right wall commonly has
++        // y1 > y2. Range::overlaps expects ascending endpoints, so compare the
++        // physical bounds without changing that direction or the linked floors.
++        return is_wall() && t() <= vertical.greater() && b() >= vertical.smaller();
+     }
+ 
+     int16_t Foothold::hdelta() const
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -135,6 +135,8 @@
+         "${CLIENT}/Character/Look/Clothing.cpp" "${CLIENT}/Character/Look/Face.cpp"
+         "${CLIENT}/Character/Look/Hair.cpp" "${CLIENT}/Character/Look/Body.cpp"
+         "${CLIENT}/Character/Look/BodyDrawInfo.cpp" "${CLIENT}/Character/Look/Stance.cpp"
++        "${CLIENT}/Gameplay/Physics/Physics.cpp"
++        "${CLIENT}/Gameplay/Physics/FootholdTree.cpp" "${CLIENT}/Gameplay/Physics/Foothold.cpp"
+         "${CLIENT}/Gameplay/QuestConversation.cpp" "${CLIENT}/Gameplay/MapleMap/Npc.cpp"
+         "${CLIENT}/Gameplay/MapleMap/MapObject.cpp"
+         "${CLIENT}/IO/Components/EquipInventoryLayout.cpp" "${CLIENT}/IO/Components/Icon.cpp"
+@@ -157,7 +159,7 @@
+     add_library(test_texture_capture OBJECT support/texture_capture.cpp)
+     target_link_libraries(test_texture_capture PUBLIC test_asset_support)
+ 
+-    foreach(name field_clock_assets king_slime v83_menu_assets cash_shop_assets character_stats equip_requirements npc_buttons npc_dialog npc_notice quest_ui quest_quiz)
++    foreach(name kpq_wall field_clock_assets king_slime v83_menu_assets cash_shop_assets character_stats equip_requirements npc_buttons npc_dialog npc_notice quest_ui quest_quiz)
+         client_test(${name}_test assets test_asset_client test_asset_support)
+     endforeach()
+     foreach(name quest_rules quest_conversation npc_quest_markers)
+diff --git a/tests/kpq_wall_test.cpp b/tests/kpq_wall_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/kpq_wall_test.cpp
+@@ -0,0 +1,53 @@
++#include <doctest/doctest.h>
++#include "support/assets.h"
++#include "client/Gameplay/Physics/Physics.h"
++#include <cmath>
++
++TEST_CASE("KPQ stage one right wall blocks a character inside its descending endpoints")
++{
++    test_support::NxFile map("Map.nx");
++    auto source = map.root()["Map"]["Map1"]["103000800.img"]["foothold"];
++    REQUIRE(source);
++    bool found_wall = false;
++    for (auto layer : source) for (auto group : layer) for (auto node : group)
++        if (node.name() == "110")
++        {
++            found_wall = true;
++            jrc::Foothold wall(node, 110, 4);
++            CHECK(wall.x1() == 767);
++            CHECK(wall.y1() == 121);
++            CHECK(wall.y2() == -48);
++            CHECK(wall.is_blocking({71, 120}));
++            CHECK_FALSE(wall.is_blocking({-120, -70}));
++            CHECK_FALSE(wall.is_blocking({130, 180}));
++        }
++    REQUIRE(found_wall);
++}
++
++TEST_CASE("Walking to the KPQ stage one wall leaves the player able to walk back")
++{
++    test_support::NxFile map("Map.nx");
++    jrc::Physics physics(map.root()["Map"]["Map1"]["103000800.img"]["foothold"]);
++    jrc::PhysicsObject player;
++    player.set_x(740);
++    player.set_y(115);
++    player.fhid = 108;
++    for (int tick = 0; tick < 1500; ++tick)
++    {
++        if (player.onground) player.hforce = .14;
++        physics.move_object(player);
++    }
++    INFO("At right wall x=", player.crnt_x(), " y=", player.crnt_y(), " fh=", player.fhid, " grounded=",player.onground);
++    CHECK(player.crnt_x() > 760);
++    CHECK(player.crnt_x() <= 767);
++    CHECK(player.onground);
++    const auto wall_x = player.crnt_x();
++    for (int tick = 0; tick < 250; ++tick)
++    {
++        if (player.onground) player.hforce = -.14;
++        physics.move_object(player);
++    }
++    CHECK(std::isfinite(player.crnt_x()));
++    CHECK(std::isfinite(player.crnt_y()));
++    CHECK(player.crnt_x() < wall_x - 100);
++}

@@ -71,6 +71,18 @@ if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/
 fi
 apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-resident-movement.patch"
 apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-resident-life.patch"
+# KPQ layers share test registration; check the final layer before older hunks.
+if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-kpq-spawn-lifecycle.patch" 2>/dev/null; then
+    if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-kpq-wall.patch" 2>/dev/null; then
+        if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-kpq-clock.patch" 2>/dev/null; then
+            apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-kpq-boss.patch"
+            apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-kpq-npc.patch"
+            apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-kpq-clock.patch"
+        fi
+        apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-kpq-wall.patch"
+    fi
+    apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-kpq-spawn-lifecycle.patch"
+fi
 apply_local_patch "$STATE/wz-converter" "$CLIENT_ROOT/macos/patches/wz-converter-macos.patch"
 
 if [ ! -f "$GAME_DIR/Base.wz" ] || [ ! -f "$GAME_DIR/Morph.wz" ] || [ ! -f "$GAME_DIR/TamingMob.wz" ]; then
