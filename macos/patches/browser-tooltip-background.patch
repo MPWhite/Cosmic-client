@@ -1,0 +1,86 @@
+--- a/src/client/IO/Components/Tooltip.h
++++ b/src/client/IO/Components/Tooltip.h
+@@ -17,7 +17,10 @@
+ //////////////////////////////////////////////////////////////////////////////
+ #pragma once
+ #include "../../Template/Point.h"
++#include "../../Constants.h"
++#include "../../Graphics/Geometry.h"
+ 
++#include <algorithm>
+ #include <cstdint>
+ 
+ 
+@@ -43,5 +46,22 @@
+         virtual ~Tooltip() = default;
+ 
+         virtual void draw(Point<int16_t> cursorpos) const = 0;
++
++    protected:
++        static Point<int16_t> draw_background(Point<int16_t> position, int16_t width, int16_t height)
++        {
++            position.shift({12, 18});
++            position.set_x(std::clamp<int16_t>(position.x(), 0,
++                std::max<int16_t>(0, Constants::viewwidth() - width)));
++            position.set_y(std::clamp<int16_t>(position.y(), 0,
++                std::max<int16_t>(0, Constants::viewheight() - height)));
++
++            // Classic v83 has no UIToolTip.img frames. Always back the content
++            // with an opaque panel so missing or translucent skins stay readable.
++            ColorBox(width, height, Geometry::WHITE, 0.7f).draw(position);
++            ColorBox(width - 2, height - 2, Geometry::BLACK, 1.0f)
++                .draw(position + Point<int16_t>(1, 1));
++            return position;
++        }
+     };
+ }
+--- a/src/client/IO/Components/SkillTooltip.cpp
++++ b/src/client/IO/Components/SkillTooltip.cpp
+@@ -145,6 +145,7 @@
+         if (skill_id == 0)
+             return;
+ 
++        pos = draw_background(pos, 348, height + 20);
+         frame.draw(pos + Point<int16_t>(176, height + 16), 320, height);
+         name.draw(pos + Point<int16_t>(16, 8));
+ 
+--- a/src/client/IO/Components/ItemTooltip.cpp
++++ b/src/client/IO/Components/ItemTooltip.cpp
+@@ -68,6 +68,7 @@
+         if (itemid == 0)
+             return;
+ 
++        pos = draw_background(pos, 264, filllength + 26);
+         top.draw(pos);
+         mid.draw({ pos + Point<int16_t>(0, 13), Point<int16_t>(0, filllength) });
+         bot.draw(pos + Point<int16_t>(0, filllength + 13));
+--- a/src/client/IO/Components/EquipTooltip.cpp
++++ b/src/client/IO/Components/EquipTooltip.cpp
+@@ -315,6 +315,7 @@
+         if (invpos == 0)
+             return;
+ 
++        pos = draw_background(pos, 264, height + 26);
+         top.draw({ pos });
+         mid.draw({ pos + Point<int16_t>(0, 13), Point<int16_t>(0, height) });
+         bot.draw({ pos + Point<int16_t>(0, height + 13) });
+--- a/src/client/IO/Components/TextTooltip.cpp
++++ b/src/client/IO/Components/TextTooltip.cpp
+@@ -56,6 +56,7 @@
+             position.shift_y(-adj_y);
+         }
+ 
++        position = draw_background(position, fillwidth + 20, fillheight + 16);
+         frame.draw(position + Point<int16_t>(fillwidth / 2 + 10, fillheight + 14), fillwidth, fillheight);
+         cover.draw(position + Point<int16_t>(-5, -2));
+         text_label.draw(position + Point<int16_t>(10, 8));
+--- a/src/client/IO/Components/MapTooltip.cpp
++++ b/src/client/IO/Components/MapTooltip.cpp
+@@ -62,6 +62,7 @@
+ 
+         position.shift(Point<int16_t>(20, -3));
+ 
++        position = draw_background(position, fillwidth + 20, fillheight + 16);
+         frame.draw(position + Point<int16_t>(fillwidth / 2 + 10, fillheight + 14), fillwidth, fillheight);
+         cover.draw(position + Point<int16_t>(-5, -2));
+ 
