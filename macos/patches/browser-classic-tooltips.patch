@@ -1,0 +1,839 @@
+--- a/src/client/IO/Components/Tooltip.h
++++ b/src/client/IO/Components/Tooltip.h
+@@ -17,15 +17,12 @@
+ //////////////////////////////////////////////////////////////////////////////
+ #pragma once
+ #include "../../Template/Point.h"
+-#include "../../Constants.h"
+-#include "../../Graphics/Geometry.h"
+-
+-#include <algorithm>
+ #include <cstdint>
+ 
+ 
+ namespace jrc
+ {
++    class Texture;
+     /// Interface for tooltips, information windows about something
+     /// the mouse cursor is pointed at.
+     class Tooltip
+@@ -48,20 +45,8 @@
+         virtual void draw(Point<int16_t> cursorpos) const = 0;
+ 
+     protected:
+-        static Point<int16_t> draw_background(Point<int16_t> position, int16_t width, int16_t height)
+-        {
+-            position.shift({12, 18});
+-            position.set_x(std::clamp<int16_t>(position.x(), 0,
+-                std::max<int16_t>(0, Constants::viewwidth() - width)));
+-            position.set_y(std::clamp<int16_t>(position.y(), 0,
+-                std::max<int16_t>(0, Constants::viewheight() - height)));
+-
+-            // Classic v83 has no UIToolTip.img frames. Always back the content
+-            // with an opaque panel so missing or translucent skins stay readable.
+-            ColorBox(width, height, Geometry::WHITE, 0.7f).draw(position);
+-            ColorBox(width - 2, height - 2, Geometry::BLACK, 1.0f)
+-                .draw(position + Point<int16_t>(1, 1));
+-            return position;
+-        }
++        static Point<int16_t> draw_background(Point<int16_t> position, int16_t width, int16_t height);
++        static void draw_icon(const Texture& icon, Point<int16_t> position);
++        static void draw_separator(Point<int16_t> position, int16_t width);
+     };
+ }
+--- a/src/client/IO/Components/EquipTooltip.h
++++ b/src/client/IO/Components/EquipTooltip.h
+@@ -38,6 +38,7 @@
+         EquipTooltip();
+ 
+         void set_equip(Parent parent, int16_t invpos);
++        void set_equip(const Equip& equip, const CharStats& stats);
+         void set_item(Parent parent, int32_t itemid);
+         void draw(Point<int16_t> position) const override;
+ 
+@@ -48,6 +49,9 @@
+         Parent source_parent;
+         int32_t source_itemid;
+         int16_t height;
++        bool classic;
++        int16_t detail_offset;
++        int32_t hammer_count;
+         bool hasdesc;
+         bool hasslots;
+         bool is_weapon;
+--- a/src/client/IO/Components/EquipTooltip.cpp
++++ b/src/client/IO/Components/EquipTooltip.cpp
+@@ -16,10 +16,9 @@
+ // along with this program.  If not, see <http://www.gnu.org/licenses/>.    //
+ //////////////////////////////////////////////////////////////////////////////
+ #include "EquipTooltip.h"
++#include "TooltipAssets.h"
+ 
+ #include "../../Character/CharStats.h"
+-#include "../../Character/Inventory/InventoryType.h"
+-#include "../../Gameplay/Stage.h"
+ #include "../../Data/EquipData.h"
+ #include "../../Data/WeaponData.h"
+ 
+@@ -31,6 +30,8 @@
+     EquipTooltip::EquipTooltip()
+     {
+         nl::node itemtt = nl::nx::ui["UIToolTip.img"]["Item"];
++        const auto equiptt = equipment_tooltip_assets(nl::nx::ui);
++        classic = !itemtt["Frame"]["top"];
+ 
+         top = itemtt["Frame"]["top"];
+         mid = itemtt["Frame"]["line"];
+@@ -52,6 +53,7 @@
+         requirements.push_back(Maplestat::DEX);
+         requirements.push_back(Maplestat::INT);
+         requirements.push_back(Maplestat::LUK);
++        if (classic) requirements.push_back(Maplestat::FAME);
+ 
+         reqstattextures[Maplestat::LEVEL][false] = itemtt["Equip"]["Cannot"]["reqLEV"];
+         reqstattextures[Maplestat::LEVEL][true] = itemtt["Equip"]["Can"]["reqLEV"];
+@@ -89,83 +91,37 @@
+         jobs[true][4]  = itemtt["Equip"]["Job"]["enable"]["4"];
+         jobs[true][5]  = itemtt["Equip"]["Job"]["enable"]["5"];
+ 
++        if (classic)
++        {
++            const char* labels[] = {"reqLEV", "reqSTR", "reqDEX", "reqINT", "reqLUK", "reqPOP"};
++            for (size_t i = 0; i < requirements.size(); ++i)
++            {
++                auto stat = requirements[i];
++                reqstattextures[stat][false] = equiptt["Cannot"][labels[i]];
++                reqstattextures[stat][true] = equiptt["Can"][labels[i]];
++                reqstatpositions[stat] = {92, static_cast<int16_t>(12 * i)};
++            }
++            reqset[false] = {equiptt["Cannot"], Charset::LEFT};
++            reqset[true] = {equiptt["Can"], Charset::LEFT};
++            const char* names[] = {"beginner", "warrior", "magician", "bowman", "thief", "pirate"};
++            for (uint8_t i = 0; i < 6; ++i)
++            {
++                jobs[false][i] = equiptt["Cannot"][names[i]];
++                jobs[true][i] = equiptt["Can"][names[i]];
++            }
++        }
++
+         invpos = 0;
+         source_parent = Tooltip::NONE;
+         source_itemid = 0;
+     }
+ 
+-    void EquipTooltip::set_equip(Parent parent, int16_t ivp)
++    void EquipTooltip::set_equip(const Equip& equip, const CharStats& stats)
+     {
+-        if (source_parent == parent && source_itemid == 0 && ivp == invpos)
+-            return;
+-
+-        source_parent = parent;
+-        source_itemid = 0;
+-        invpos = ivp;
+-
+-        if (ivp == 0)
+-            return;
+-
+-        const Player& player = Stage::get().get_player();
+-
+-        InventoryType::Id invtype;
+-        switch (parent)
+-        {
+-        case ITEMINVENTORY:
+-        case SHOP:
+-            invtype = InventoryType::EQUIP;
+-            break;
+-        case EQUIPINVENTORY:
+-            invtype = InventoryType::EQUIPPED;
+-            break;
+-        default:
+-            invtype = InventoryType::NONE;
+-        }
+-
+-        auto oequip = player.get_inventory().get_equip(invtype, ivp);
+-        if (!oequip)
+-        {
+-            invpos = 0;
+-            return;
+-        }
+-
+-        const Equip& equip = *oequip;
+-        const EquipData& equipdata = EquipData::get(equip.get_item_id());
+-        load(equip, equipdata, player.get_stats());
+-    }
+-
+-    void EquipTooltip::set_item(Parent parent, int32_t itemid)
+-    {
+-        if (source_parent == parent && source_itemid == itemid && invpos == -1)
+-            return;
+-
+-        source_parent = parent;
+-        source_itemid = itemid;
+         invpos = -1;
+-
+-        if (itemid == 0 || InventoryType::by_item_id(itemid) != InventoryType::EQUIP)
+-        {
+-            invpos = 0;
+-            return;
+-        }
+-
+-        const EquipData& equipdata = EquipData::get(itemid);
+-        if (!equipdata)
+-        {
+-            invpos = 0;
+-            return;
+-        }
+-
+-        EnumMap<Equipstat::Id, uint16_t> stats;
+-        for (Equipstat::Id es = Equipstat::STR; es <= Equipstat::JUMP; es = static_cast<Equipstat::Id>(es + 1))
+-        {
+-            int16_t defstat = equipdata.get_defstat(es);
+-            stats[es] = defstat > 0 ? static_cast<uint16_t>(defstat) : 0;
+-        }
+-
+-        // Shop preview only has static item data, so we render a synthetic equip with base stats.
+-        Equip preview(itemid, 0, "", 0, equipdata.get_slots(), 0, stats, 0, 0, 0);
+-        load(preview, equipdata, Stage::get().get_player().get_stats());
++        source_parent = Tooltip::NONE;
++        source_itemid = equip.get_item_id();
++        load(equip, EquipData::get(equip.get_item_id()), stats);
+     }
+ 
+     void EquipTooltip::load(const Equip& equip, const EquipData& equipdata, const CharStats& stats)
+@@ -179,9 +135,16 @@
+ 
+         for (auto& ms : requirements)
+         {
+-            canequip[ms] = equipdata.meets_requirement(ms, stats);
+-            std::string reqstr = std::to_string(equipdata.get_reqstat(ms));
+-            reqstr.insert(0, 3 - reqstr.size(), '0');
++            int16_t required = equipdata.get_reqstat(ms);
++            if (ms == Maplestat::FAME)
++            {
++                const auto info = nl::nx::character[itemdata.get_category()]["0" + std::to_string(item_id) + ".img"]["info"];
++                required = info["reqPOP"];
++                canequip[ms] = static_cast<int16_t>(stats.get_stat(ms)) >= required;
++            }
++            else canequip[ms] = equipdata.meets_requirement(ms, stats);
++            std::string reqstr = required == 0 && ms == Maplestat::FAME ? "n" : std::to_string(required);
++            if (!classic && reqstr.size() < 3) reqstr.insert(0, 3 - reqstr.size(), '0');
+             reqstatstrings[ms] = reqstr;
+         }
+ 
+@@ -250,23 +213,23 @@
+             namestr.append(std::to_string(equip.get_level()));
+             namestr.append(")");
+         }
+-        name = { Text::A12B, Text::CENTER, namecolor, namestr, 400 };
++        name = { Text::A12B, classic ? Text::LEFT : Text::CENTER, namecolor, namestr, static_cast<uint16_t>(classic ? 220 : 400) };
+ 
+         std::string desctext = itemdata.get_desc();
+         hasdesc = desctext.size() > 0;
+         if (hasdesc)
+         {
+-            desc = { Text::A12M, Text::LEFT, Text::WHITE, desctext, 250 };
++            desc = { Text::A12M, Text::LEFT, Text::WHITE, desctext, static_cast<uint16_t>(classic ? 220 : 250) };
+             height += desc.height() + 10;
+         }
+ 
+-        category = { Text::A11L, Text::LEFT, Text::WHITE, "CATEGORY: " + equipdata.get_type() };
++        category = { Text::A11L, Text::LEFT, Text::WHITE, "CATEGORY : " + equipdata.get_type() };
+ 
+         is_weapon = equipdata.is_weapon();
+         if (is_weapon)
+         {
+             const WeaponData& weapon = WeaponData::get(item_id);
+-            wepspeed = { Text::A11L, Text::LEFT, Text::WHITE, "ATTACK SPEED: " + weapon.getspeedstring() };
++            wepspeed = { Text::A11L, Text::LEFT, Text::WHITE, "ATTACK SPEED : " + weapon.getspeedstring() };
+         }
+         else
+         {
+@@ -276,7 +239,7 @@
+         hasslots = (equip.get_slots() > 0) || (equip.get_level() > 0);
+         if (hasslots)
+         {
+-            slots = { Text::A11L, Text::LEFT, Text::WHITE, "UPGRADES AVAILABLE: " + std::to_string(equip.get_slots()) };
++            slots = { Text::A11L, Text::LEFT, Text::WHITE, "NUMBER OF UPGRADES AVAILABLE : " + std::to_string(equip.get_slots()) };
+ 
+             std::string vicious = std::to_string(equip.get_vicious());
+             if (equip.get_vicious() > 1)
+@@ -295,18 +258,38 @@
+             {
+                 int16_t delta = equip.get_stat(es) - equipdata.get_defstat(es);
+                 std::string statstr = std::to_string(equip.get_stat(es));
+-                if (delta != 0)
++                if (delta != 0 && !classic)
+                 {
+                     statstr.append(" (");
+                     statstr.append((delta < 0) ? "-" : "+");
+                     statstr.append(std::to_string(abs(delta)) + ")");
+                 }
+-                statlabels[es] = { Text::A11L, Text::LEFT, Text::WHITE, Equipstat::names[es] + std::string(": ") + statstr };
++                const char* label = Equipstat::names[es];
++                if (classic)
++                {
++                    if (es == Equipstat::WATK) label = "WEAPON ATTACK";
++                    else if (es == Equipstat::MAGIC) label = "MAGIC ATTACK";
++                    else if (es == Equipstat::WDEF) label = "WEAPON DEF.";
++                    else if (es == Equipstat::MDEF) label = "MAGIC DEF.";
++                }
++                statlabels[es] = { Text::A11L, Text::LEFT, Text::WHITE, label + std::string(" : ") + statstr };
+             }
+             else
+             {
+                 height -= 18;
+             }
++        }
++
++        if (classic)
++        {
++            hammer_count = equip.get_vicious();
++            // Fit the original six requirement rows and job strip, then size
++            // the lower section from actual populated stats instead of a fixed box.
++            detail_offset = 16 + name.height() + 80 + 13 + 12;
++            int lines = 1 + static_cast<int>(is_weapon) + static_cast<int>(hasslots) + (hammer_count > 0);
++            for (const auto& label : statlabels.values()) if (!label.empty()) ++lines;
++            height = detail_offset + lines * 14 + 10;
++            if (hasdesc) height += desc.height() + 12;
+         }
+     }
+ 
+@@ -315,6 +298,43 @@
+         if (invpos == 0)
+             return;
+ 
++        if (classic)
++        {
++            pos = draw_background(pos, 240, height);
++            name.draw(pos + Point<int16_t>(10, 8));
++            const auto body = pos + Point<int16_t>(10, 16 + name.height());
++            draw_icon(itemicon, body + Point<int16_t>(0, 4));
++            for (auto stat : requirements)
++            {
++                const auto at = pos + Point<int16_t>(0, 16 + name.height()) + reqstatpositions[stat];
++                const bool allowed = canequip[stat];
++                reqstattextures[stat][allowed].draw(at);
++                reqset[allowed].draw(reqstatstrings[stat], 6, at + Point<int16_t>(50, 0));
++            }
++            int16_t x = 10;
++            const int16_t jobs_y = 16 + name.height() + 80;
++            for (uint8_t job = 0; job < 6; ++job)
++            {
++                const bool allowed = std::find(okjobs.begin(), okjobs.end(), job) != okjobs.end();
++                const auto& label = jobs[allowed && canequip[Maplestat::JOB]].at(job);
++                label.draw(pos + Point<int16_t>(x, jobs_y));
++                x += label.width() + 2;
++            }
++            draw_separator(pos + Point<int16_t>(8, detail_offset - 7), 224);
++            auto cursor = pos + Point<int16_t>(10, detail_offset);
++            category.draw(cursor); cursor.shift_y(14);
++            if (is_weapon) { wepspeed.draw(cursor); cursor.shift_y(14); }
++            for (const auto& label : statlabels.values())
++                if (!label.empty()) { label.draw(cursor); cursor.shift_y(14); }
++            if (hasslots) { slots.draw(cursor); cursor.shift_y(14); }
++            if (hammer_count > 0) { hammers.draw(cursor); cursor.shift_y(14); }
++            if (hasdesc)
++            {
++                draw_separator(cursor + Point<int16_t>(-2, 4), 224);
++                desc.draw(cursor + Point<int16_t>(0, 10));
++            }
++            return;
++        }
+         pos = draw_background(pos, 264, height + 26);
+         top.draw({ pos });
+         mid.draw({ pos + Point<int16_t>(0, 13), Point<int16_t>(0, height) });
+--- a/src/client/IO/Components/ItemTooltip.h
++++ b/src/client/IO/Components/ItemTooltip.h
+@@ -34,6 +34,7 @@
+ 
+     private:
+         int32_t itemid;
++        bool classic;
+         int16_t filllength;
+         Texture itemicon;
+ 
+--- a/src/client/IO/Components/ItemTooltip.cpp
++++ b/src/client/IO/Components/ItemTooltip.cpp
+@@ -22,11 +22,14 @@
+ #include "nlnx/nx.hpp"
+ #include "nlnx/node.hpp"
+ 
++#include <algorithm>
++
+ namespace jrc
+ {
+     ItemTooltip::ItemTooltip()
+     {
+         nl::node itemtt = nl::nx::ui["UIToolTip.img"]["Item"];
++        classic = !itemtt["Frame"]["top"];
+ 
+         top = itemtt["Frame"]["top"];
+         mid = itemtt["Frame"]["line"];
+@@ -52,8 +55,14 @@
+         const ItemData& idata = ItemData::get(itemid);
+ 
+         itemicon = idata.get_icon(false);
+-        name = { Text::A12B, Text::CENTER, Text::WHITE, idata.get_name(), 240 };
+-        desc = { Text::A12M, Text::LEFT, Text::WHITE, idata.get_desc(), 150 };
++        name = { Text::A12B, classic ? Text::LEFT : Text::CENTER, Text::WHITE, idata.get_name(), 268 };
++        desc = { Text::A12M, Text::LEFT, Text::WHITE, idata.get_desc(), static_cast<uint16_t>(classic ? 190 : 150) };
++
++        if (classic)
++        {
++            filllength = 16 + name.height() + std::max<int16_t>(64, desc.height()) + 10;
++            return true;
++        }
+ 
+         filllength = 81 + name.height();
+         int16_t descdelta = desc.height() - 80;
+@@ -68,6 +77,15 @@
+         if (itemid == 0)
+             return;
+ 
++        if (classic)
++        {
++            pos = draw_background(pos, 288, filllength);
++            name.draw(pos + Point<int16_t>(10, 8));
++            const auto body = pos + Point<int16_t>(10, 16 + name.height());
++            draw_icon(itemicon, body);
++            desc.draw(body + Point<int16_t>(78, 0));
++            return;
++        }
+         pos = draw_background(pos, 264, filllength + 26);
+         top.draw(pos);
+         mid.draw({ pos + Point<int16_t>(0, 13), Point<int16_t>(0, filllength) });
+--- a/src/client/IO/Components/SkillTooltip.h
++++ b/src/client/IO/Components/SkillTooltip.h
+@@ -37,6 +37,7 @@
+ 
+     private:
+         int32_t skill_id;
++        bool classic;
+         int16_t height;
+         int16_t icon_offset;
+         int16_t level_offset;
+--- a/src/client/IO/Components/SkillTooltip.cpp
++++ b/src/client/IO/Components/SkillTooltip.cpp
+@@ -28,6 +28,7 @@
+         : line(318, Geometry::WHITE, 1.0f) {
+ 
+         nl::node itemtt = nl::nx::ui["UIToolTip.img"]["Item"];
++        classic = !itemtt["Frame2"]["c"];
+ 
+         frame = itemtt["Frame2"];
+         base = itemtt["ItemIcon"]["base"];
+@@ -107,7 +108,7 @@
+             }
+         }
+ 
+-        if (data.is_passive())
++        if (data.is_passive() && !classic)
+         {
+             descstr += "\\r#cPassive Skill#";
+         }
+@@ -131,9 +132,17 @@
+         }
+ 
+         icon = data.get_icon(SkillData::NORMAL);
+-        name = { Text::A12B, Text::LEFT, Text::WHITE, data.get_name(), 320 };
+-        desc = { Text::A12M, Text::LEFT, Text::WHITE, descstr, 230 };
+-        leveldesc = { Text::A12M, Text::LEFT, Text::WHITE, levelstr, 330 };
++        name = { Text::A12B, Text::LEFT, Text::WHITE, data.get_name(), static_cast<uint16_t>(classic ? 280 : 320) };
++        desc = { Text::A12M, Text::LEFT, Text::WHITE, descstr, static_cast<uint16_t>(classic ? 202 : 230) };
++        leveldesc = { Text::A12M, Text::LEFT, Text::WHITE, levelstr, static_cast<uint16_t>(classic ? 280 : 330) };
++
++        if (classic)
++        {
++            icon_offset = name.height() + 16;
++            level_offset = icon_offset + std::max<int16_t>(64, desc.height()) + 8;
++            height = level_offset + (leveldesc.empty() ? 2 : leveldesc.height() + 16);
++            return;
++        }
+ 
+         icon_offset = 4 + name.height();
+         level_offset = std::max<int16_t>(desc.height(), 92) + 16;
+@@ -145,6 +154,19 @@
+         if (skill_id == 0)
+             return;
+ 
++        if (classic)
++        {
++            pos = draw_background(pos, 300, height);
++            name.draw(pos + Point<int16_t>(10, 8));
++            draw_icon(icon, pos + Point<int16_t>(10, icon_offset));
++            desc.draw(pos + Point<int16_t>(88, icon_offset));
++            if (!leveldesc.empty())
++            {
++                draw_separator(pos + Point<int16_t>(8, level_offset), 284);
++                leveldesc.draw(pos + Point<int16_t>(10, level_offset + 8));
++            }
++            return;
++        }
+         pos = draw_background(pos, 348, height + 20);
+         frame.draw(pos + Point<int16_t>(176, height + 16), 320, height);
+         name.draw(pos + Point<int16_t>(16, 8));
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -99,7 +99,7 @@
+ client_test(viewport_camera_test unit)
+ 
+ if(TEST_ASSETS)
+-    foreach(asset Character Etc Item Mob Npc Quest String UI UI_83)
++    foreach(asset Character Etc Item Mob Npc Quest Skill String UI UI_83)
+         if(NOT EXISTS "${TEST_ASSET_DIR}/${asset}.nx")
+             message(FATAL_ERROR "Asset tests require ${TEST_ASSET_DIR}/${asset}.nx. Set TEST_ASSET_DIR to an existing asset directory, or configure with TEST_ASSETS=OFF.")
+         endif()
+@@ -128,6 +128,7 @@
+ 
+     add_library(test_asset_client STATIC
+         "${CLIENT}/Data/CashShopCatalog.cpp" "${CLIENT}/Data/ItemData.cpp"
++        "${CLIENT}/Data/SkillData.cpp"
+         "${CLIENT}/Data/EquipData.cpp" "${CLIENT}/Data/WeaponData.cpp" "${CLIENT}/Data/QuestData.cpp"
+         "${CLIENT}/Character/CharStats.cpp" "${CLIENT}/Character/MapleStat.cpp"
+         "${CLIENT}/Character/QuestLog.cpp" "${CLIENT}/Character/Inventory/Weapon.cpp"
+@@ -141,6 +142,9 @@
+         "${CLIENT}/Gameplay/MapleMap/MapObject.cpp"
+         "${CLIENT}/IO/Components/EquipInventoryLayout.cpp" "${CLIENT}/IO/Components/Icon.cpp"
+         "${CLIENT}/IO/Components/Charset.cpp" "${CLIENT}/IO/Components/Button.cpp"
++        "${CLIENT}/IO/Components/Tooltip.cpp" "${CLIENT}/IO/Components/MapleFrame.cpp"
++        "${CLIENT}/IO/Components/ItemTooltip.cpp" "${CLIENT}/IO/Components/SkillTooltip.cpp"
++        "${CLIENT}/IO/Components/EquipTooltip.cpp"
+         "${CLIENT}/IO/Components/MapleButton.cpp" "${CLIENT}/IO/Components/TwoSpriteButton.cpp"
+         "${CLIENT}/IO/Components/Slider.cpp" "${CLIENT}/IO/Components/NpcText.cpp"
+         "${CLIENT}/IO/Components/Textfield.cpp" "${CLIENT}/IO/UITypes/UINotice.cpp"
+@@ -161,9 +165,13 @@
+     add_library(test_texture_capture OBJECT support/texture_capture.cpp)
+     target_link_libraries(test_texture_capture PUBLIC test_asset_support)
+ 
+-    foreach(name kpq_wall field_clock_assets king_slime v83_menu_assets cash_shop_assets character_stats equip_requirements npc_buttons npc_dialog npc_notice quest_ui quest_quiz)
++    foreach(name classic_tooltip kpq_wall field_clock_assets king_slime v83_menu_assets cash_shop_assets character_stats equip_requirements npc_buttons npc_dialog npc_notice quest_ui quest_quiz)
+         client_test(${name}_test assets test_asset_client test_asset_support)
+     endforeach()
++    target_sources(classic_tooltip_test PRIVATE
++        "${CLIENT}/Character/EquipStat.cpp"
++        "${CLIENT}/Character/Inventory/EquipQuality.cpp"
++        "${CLIENT}/Graphics/Geometry.cpp")
+     foreach(name quest_rules quest_conversation npc_quest_markers)
+         client_test(${name}_test assets test_inventory_stub test_asset_client test_asset_support)
+     endforeach()
+--- /dev/null
++++ b/src/client/IO/Components/Tooltip.cpp
+@@ -0,0 +1,53 @@
++#include "Tooltip.h"
++
++#include "../../Constants.h"
++#include "../../Graphics/GraphicsGL.h"
++#include "../../Graphics/Texture.h"
++#include "nlnx/nx.hpp"
++
++#include <algorithm>
++
++namespace jrc
++{
++    Point<int16_t> Tooltip::draw_background(Point<int16_t> position, int16_t width, int16_t height)
++    {
++        position.shift({12, 18});
++        position.set_x(std::clamp<int16_t>(position.x(), 0,
++            std::max<int16_t>(0, Constants::viewwidth() - width - 1)));
++        position.set_y(std::clamp<int16_t>(position.y(), 0,
++            std::max<int16_t>(0, Constants::viewheight() - height - 1)));
++        auto& graphics = GraphicsGL::get();
++        const int16_t x = position.x(), y = position.y();
++        // The classic client draws this translucent blue frame procedurally;
++        // v83 UI.wz supplies the icon inset and requirement glyphs separately.
++        graphics.drawrectangle(x + 1, y + 1, width, height, 0.0f, 0.0f, 0.0f, 0.35f);
++        graphics.drawrectangle(x + 1, y + 1, width - 2, height - 2, 0.20f, 0.20f, 0.36f, 0.90f);
++        graphics.drawrectangle(x + 1, y, width - 2, 1, 0.80f, 0.80f, 0.90f, 0.95f);
++        graphics.drawrectangle(x, y + 1, 1, height - 2, 0.80f, 0.80f, 0.90f, 0.95f);
++        graphics.drawrectangle(x + 1, y + height - 1, width - 2, 1, 0.65f, 0.65f, 0.78f, 0.95f);
++        graphics.drawrectangle(x + width - 1, y + 1, 1, height - 2, 0.65f, 0.65f, 0.78f, 0.95f);
++        return position;
++    }
++
++    void Tooltip::draw_icon(const Texture& icon, Point<int16_t> position)
++    {
++        const Texture inset(nl::nx::ui["UIWindow.img"]["IconBase"]["0"]);
++        inset.draw({position + inset.get_origin(), position + inset.get_origin(),
++            Point<int16_t>(64, 64), 1.0f, 1.0f, Color(0.75f, 0.75f, 0.84f, 1.0f), 0.0f});
++        if (!icon.is_valid()) return;
++        const float scale = std::min(2.0f, 60.0f / std::max(icon.width(), icon.height()));
++        const Point<int16_t> top_left(
++            (64 - static_cast<int16_t>(icon.width() * scale)) / 2,
++            (64 - static_cast<int16_t>(icon.height() * scale)) / 2);
++        const auto origin = icon.get_origin();
++        const Point<int16_t> anchor(static_cast<int16_t>(origin.x() * scale),
++                                    static_cast<int16_t>(origin.y() * scale));
++        icon.draw({position + top_left + anchor, scale, scale});
++    }
++
++    void Tooltip::draw_separator(Point<int16_t> position, int16_t width)
++    {
++        GraphicsGL::get().drawrectangle(position.x(), position.y(), width, 1,
++            0.80f, 0.80f, 0.90f, 0.35f);
++    }
++}
+--- /dev/null
++++ b/src/client/IO/Components/TooltipAssets.h
+@@ -0,0 +1,12 @@
++#pragma once
++
++#include "nlnx/node.hpp"
++
++namespace jrc
++{
++    inline nl::node equipment_tooltip_assets(nl::node ui)
++    {
++        const auto classic = ui["UIWindow.img"]["ToolTip"]["Equip"];
++        return classic["Can"]["reqLEV"] ? classic : ui["UIToolTip.img"]["Item"]["Equip"];
++    }
++}
+--- /dev/null
++++ b/src/client/IO/Components/EquipTooltipSource.cpp
+@@ -0,0 +1,83 @@
++#include "EquipTooltip.h"
++
++#include "../../Character/Inventory/InventoryType.h"
++#include "../../Data/EquipData.h"
++#include "../../Gameplay/Stage.h"
++
++namespace jrc
++{
++    void EquipTooltip::set_equip(Parent parent, int16_t ivp)
++    {
++        if (source_parent == parent && source_itemid == 0 && ivp == invpos)
++            return;
++
++        source_parent = parent;
++        source_itemid = 0;
++        invpos = ivp;
++
++        if (ivp == 0)
++            return;
++
++        const Player& player = Stage::get().get_player();
++
++        InventoryType::Id invtype;
++        switch (parent)
++        {
++        case ITEMINVENTORY:
++        case SHOP:
++            invtype = InventoryType::EQUIP;
++            break;
++        case EQUIPINVENTORY:
++            invtype = InventoryType::EQUIPPED;
++            break;
++        default:
++            invtype = InventoryType::NONE;
++        }
++
++        auto oequip = player.get_inventory().get_equip(invtype, ivp);
++        if (!oequip)
++        {
++            invpos = 0;
++            return;
++        }
++
++        const Equip& equip = *oequip;
++        const EquipData& equipdata = EquipData::get(equip.get_item_id());
++        load(equip, equipdata, player.get_stats());
++    }
++
++    void EquipTooltip::set_item(Parent parent, int32_t itemid)
++    {
++        if (source_parent == parent && source_itemid == itemid && invpos == -1)
++            return;
++
++        source_parent = parent;
++        source_itemid = itemid;
++        invpos = -1;
++
++        if (itemid == 0 || InventoryType::by_item_id(itemid) != InventoryType::EQUIP)
++        {
++            invpos = 0;
++            return;
++        }
++
++        const EquipData& equipdata = EquipData::get(itemid);
++        if (!equipdata)
++        {
++            invpos = 0;
++            return;
++        }
++
++        EnumMap<Equipstat::Id, uint16_t> stats;
++        for (Equipstat::Id es = Equipstat::STR; es <= Equipstat::JUMP; es = static_cast<Equipstat::Id>(es + 1))
++        {
++            int16_t defstat = equipdata.get_defstat(es);
++            stats[es] = defstat > 0 ? static_cast<uint16_t>(defstat) : 0;
++        }
++
++        // Shop preview only has static item data, so we render a synthetic equip with base stats.
++        Equip preview(itemid, 0, "", 0, equipdata.get_slots(), 0, stats, 0, 0, 0);
++        load(preview, equipdata, Stage::get().get_player().get_stats());
++    }
++
++}
+--- /dev/null
++++ b/tests/classic_tooltip_test.cpp
+@@ -0,0 +1,161 @@
++#include "support/assets.h"
++#include "support/render_capture.h"
++#include "client/IO/Components/TooltipAssets.h"
++#include "client/IO/Components/ItemTooltip.h"
++#include "client/IO/Components/SkillTooltip.h"
++#include "client/IO/Components/EquipTooltip.h"
++#include "client/Character/CharStats.h"
++#include "client/Data/EquipData.h"
++#include "client/Graphics/GraphicsGL.h"
++#include "client/Constants.h"
++#include "client/Audio/Audio.h"
++#include "nlnx/nx.hpp"
++#include <doctest/doctest.h>
++#include <algorithm>
++
++namespace
++{
++    using namespace jrc;
++    struct Label { std::string text; Point<int16_t> at; Point<int16_t> size; };
++    struct Fill { Rectangle<int16_t> bounds; float red, blue, alpha; };
++    std::vector<Label> labels;
++    std::vector<Fill> fills;
++
++    struct Assets
++    {
++        test_support::NxFile ui{"UI.nx", nl::nx::ui};
++        test_support::NxFile item{"Item.nx", nl::nx::item};
++        test_support::NxFile character{"Character.nx", nl::nx::character};
++        test_support::NxFile skill{"Skill.nx", nl::nx::skill};
++        test_support::NxFile string{"String.nx", nl::nx::string};
++    };
++
++    void clear_draws()
++    {
++        test_support::draws.clear(); labels.clear(); fills.clear();
++        Constants::set_viewsize(800, 600);
++    }
++
++    bool drew(nl::node asset)
++    {
++        const auto id = asset.get_bitmap().id();
++        return std::any_of(test_support::draws.begin(), test_support::draws.end(),
++            [&](const auto& draw) { return draw.bitmap.id() == id; });
++    }
++
++    void check_frame()
++    {
++        REQUIRE(fills.size() >= 6);
++        const auto& panel = fills[0].bounds;
++        CHECK(panel.l() >= 0); CHECK(panel.t() >= 0);
++        CHECK(panel.r() <= 800); CHECK(panel.b() <= 600);
++        CHECK(fills[1].blue > fills[1].red);
++        CHECK(fills[1].alpha >= 0.85f);
++        CHECK(fills[1].alpha < 1.0f);
++        for (const auto& label : labels)
++        {
++            CHECK(label.at.x() >= panel.l() - 1);
++            CHECK(label.at.y() >= panel.t() - 1);
++            CHECK(label.at.x() + label.size.x() <= panel.r());
++            CHECK(label.at.y() + label.size.y() <= panel.b());
++        }
++        REQUIRE(drew(nl::nx::ui["UIWindow.img"]["IconBase"]["0"]));
++        for (const auto& draw : test_support::draws)
++        {
++            CHECK(draw.bounds.l() >= panel.l() - 1);
++            CHECK(draw.bounds.t() >= panel.t() - 1);
++            CHECK(draw.bounds.r() <= panel.r());
++            CHECK(draw.bounds.b() <= panel.b());
++        }
++    }
++
++    CharStats character(uint16_t job, uint16_t level, uint16_t amount)
++    {
++        StatsEntry entry{};
++        entry.stats.clear();
++        entry.stats[Maplestat::JOB] = job;
++        entry.stats[Maplestat::LEVEL] = level;
++        for (auto stat : {Maplestat::STR, Maplestat::DEX, Maplestat::INT, Maplestat::LUK})
++            entry.stats[stat] = amount;
++        CharStats result(entry);
++        for (auto stat : {Equipstat::STR, Equipstat::DEX, Equipstat::INT, Equipstat::LUK})
++            result.set_total(stat, amount);
++        return result;
++    }
++}
++
++namespace jrc
++{
++    Sound::Sound() : id(0) {}
++    Sound::Sound(nl::node) : id(0) {}
++    GraphicsGL::GraphicsGL() : locked(false) {}
++    void GraphicsGL::addbitmap(const nl::bitmap&) {}
++    void GraphicsGL::draw(const nl::bitmap& bitmap, const Rectangle<int16_t>& rect, const Color&, float)
++    { test_support::draws.push_back({bitmap, rect}); }
++    void GraphicsGL::draw_clipped(const nl::bitmap&, const Rectangle<int16_t>&, const Color&, Range<int16_t>) {}
++    void GraphicsGL::drawrectangle(int16_t x, int16_t y, int16_t w, int16_t h, float red, float, float blue, float alpha)
++    { fills.push_back({{x, static_cast<int16_t>(x + w), y, static_cast<int16_t>(y + h)}, red, blue, alpha}); }
++    Text::Layout GraphicsGL::createlayout(const std::string& text, Text::Font, Text::Alignment, int16_t maxwidth, bool)
++    {
++        const int16_t limit = maxwidth ? maxwidth : 800;
++        int16_t x = 0, width = 0, height = text.empty() ? 0 : 14;
++        for (size_t i = 0; i < text.size(); ++i)
++        {
++            if (text[i] == '\\' && i + 1 < text.size() && (text[i + 1] == 'n' || text[i + 1] == 'r'))
++            { width = std::max(width, x); x = 0; height += 14; ++i; continue; }
++            if (x + 6 > limit) { width = std::max(width, x); x = 0; height += 14; }
++            x += 6;
++        }
++        width = std::max(width, x);
++        return {{}, std::vector<int16_t>(text.size() + 1), width, height, x, height};
++    }
++    void GraphicsGL::drawtext(const DrawArgument& args, const std::string& text, const Text::Layout& layout,
++        Text::Font, Text::Color, Text::Background, const Range<int16_t>*)
++    { if (!text.empty()) labels.push_back({text, args.getpos(), layout.get_dimensions()}); }
++}
++
++TEST_CASE("Classic item and skill tooltips use an inset icon and fit the viewport")
++{
++    Assets assets;
++    ItemTooltip item;
++    REQUIRE(item.set_item(2000002));
++    clear_draws(); item.draw({799, 599}); check_frame();
++    CHECK(labels.front().text == "White Potion");
++    CHECK(fills[0].bounds.r() - fills[0].bounds.l() == 288);
++
++    SkillTooltip skill;
++    skill.set_skill(1000002, 0, 8, -1);
++    clear_draws(); skill.draw({799, 599}); check_frame();
++    CHECK(labels.front().text == "Endure");
++    CHECK(fills[0].bounds.r() - fills[0].bounds.l() == 300);
++}
++
++TEST_CASE("Classic equipment requirements use original red and white glyphs with actual stats")
++{
++    Assets assets;
++    const int32_t id = 1472053;
++    const auto& data = EquipData::get(id);
++    REQUIRE(data);
++    EnumMap<Equipstat::Id, uint16_t> stats;
++    for (Equipstat::Id stat = Equipstat::STR; stat <= Equipstat::JUMP; stat = static_cast<Equipstat::Id>(stat + 1))
++        stats[stat] = std::max<int16_t>(0, data.get_defstat(stat));
++    Equip equip(id, 0, "", 0, data.get_slots(), 0, stats, 0, 0, 0);
++    EquipTooltip tooltip;
++    auto poor = character(100, 1, 4);
++    tooltip.set_equip(equip, poor);
++    clear_draws(); tooltip.draw({799, 599}); check_frame();
++    CHECK(fills[0].bounds.r() - fills[0].bounds.l() == 240);
++    const auto source = equipment_tooltip_assets(nl::nx::ui);
++    CHECK(drew(source["Cannot"]["reqLEV"]));
++    CHECK(drew(source["Cannot"]["reqDEX"]));
++    CHECK(std::none_of(labels.begin(), labels.end(), [](const auto& label)
++        { return label.text.find("HAMMERS") != std::string::npos; }));
++    auto eligible = character(400, 200, 999);
++    tooltip.set_equip(equip, eligible);
++    clear_draws(); tooltip.draw({0, 0}); check_frame();
++    CHECK(drew(source["Can"]["reqLEV"]));
++    CHECK(drew(source["Can"]["reqDEX"]));
++    CHECK(drew(source["Can"]["thief"]));
++    CHECK(std::any_of(labels.begin(), labels.end(), [&](const auto& label)
++        { return label.text == "WEAPON ATTACK : " + std::to_string(stats[Equipstat::WATK]); }));
++}

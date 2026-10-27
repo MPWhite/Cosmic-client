@@ -11,7 +11,7 @@ from pathlib import Path
 source = Path(os.environ['COSMIC_UI_ASSETS'])
 fixture = Path(os.environ['COSMIC_UI_FIXTURE'])
 fixture.mkdir(parents=True, exist_ok=True)
-for name in ('Character', 'Etc', 'Item', 'Npc', 'Quest', 'String', 'UI', 'UI_83'):
+for name in ('Character', 'Etc', 'Item', 'Npc', 'Quest', 'Skill', 'String', 'UI', 'UI_83'):
     target = source / ('UI.nx' if name == 'UI_83' else name + '.nx')
     if not target.is_file():
         raise SystemExit(f'Missing {target}; run setup-macos.sh first.')

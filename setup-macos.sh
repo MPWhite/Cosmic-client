@@ -87,7 +87,10 @@ if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/
 fi
 fi
 apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-npc-shop.patch"
-apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-tooltip-background.patch"
+if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-classic-tooltips.patch" 2>/dev/null; then
+    apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-tooltip-background.patch"
+    apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-classic-tooltips.patch"
+fi
 apply_local_patch "$STATE/wz-converter" "$CLIENT_ROOT/macos/patches/wz-converter-macos.patch"
 
 if [ ! -f "$GAME_DIR/Base.wz" ] || [ ! -f "$GAME_DIR/Morph.wz" ] || [ ! -f "$GAME_DIR/TamingMob.wz" ]; then
