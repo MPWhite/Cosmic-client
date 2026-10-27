@@ -54,6 +54,8 @@ apply_local_patch() {
 checkout_source "$BROWSER_ROOT" https://github.com/nmnsnv/maplestory-wasm.git 9eef4c730ff5639089eeccae51bf6266c878c30c
 checkout_source "$STATE/wz-converter" https://github.com/ryantpayton/NoLifeWzToNx.git 73bddde1214445795d0a5cd4c3d431fe15eb49eb
 checkout_source "$STATE/emsdk" https://github.com/emscripten-core/emsdk.git d7b4130688bfa348392b921ab04015aa15c4f154
+# The shop layer overlaps earlier UI patches; an installed final layer skips them.
+if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-npc-shop.patch" 2>/dev/null; then
 # Later patches overlap earlier hunks. Check the final layer before migrating
 # either a fresh checkout or an existing desktop-only installation.
 if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/browser-cashshop.patch" 2>/dev/null; then
@@ -83,6 +85,8 @@ if ! git -C "$BROWSER_ROOT" apply --reverse --check "$CLIENT_ROOT/macos/patches/
     fi
     apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-kpq-spawn-lifecycle.patch"
 fi
+fi
+apply_local_patch "$BROWSER_ROOT" "$CLIENT_ROOT/macos/patches/browser-npc-shop.patch"
 apply_local_patch "$STATE/wz-converter" "$CLIENT_ROOT/macos/patches/wz-converter-macos.patch"
 
 if [ ! -f "$GAME_DIR/Base.wz" ] || [ ! -f "$GAME_DIR/Morph.wz" ] || [ ! -f "$GAME_DIR/TamingMob.wz" ]; then

@@ -1,0 +1,262 @@
+--- a/src/client/Net/Handlers/NpcInteractionHandlers.h
++++ b/src/client/Net/Handlers/NpcInteractionHandlers.h
+@@ -32,6 +32,11 @@
+         void handle(InPacket& recv) const override;
+     };
+ 
++    class ShopTransactionHandler : public PacketHandler
++    {
++        void handle(InPacket& recv) const override;
++    };
++
+     // Handles storage (trunk) open/update packets.
+     class StorageHandler : public PacketHandler
+     {
+--- a/src/client/Net/PacketSwitch.cpp
++++ b/src/client/Net/PacketSwitch.cpp
+@@ -244,6 +244,7 @@
+         // Npc Interaction Handlers
+         emplace<NPC_DIALOGUE, NpcDialogueHandler>();
+         emplace<OPEN_NPC_SHOP, OpenNpcShopHandler>();
++        emplace<0x132, ShopTransactionHandler>();
+         emplace<STORAGE, StorageHandler>();
+ 
+         // Quest Handlers
+--- a/src/client/IO/UITypes/UIShop.cpp
++++ b/src/client/IO/UITypes/UIShop.cpp
+@@ -633,6 +633,7 @@
+     {
+         if (selection < 0 || selection >= lastslot)
+         {
++            UI::get().emplace<UIOk>("Select an item from the shop before clicking Buy Item.", [] {});
+             return;
+         }
+ 
+@@ -640,6 +641,9 @@
+         int16_t buyable = item.get_buyable();
+         int16_t slot = selection;
+         int32_t itemid = item.get_id();
++        // Equipment is purchased individually; rechargeable ammo is one full pack.
++        if (itemid / 1000000 == 1 || itemid / 10000 == 207 || itemid / 10000 == 233)
++            buyable = 1;
+         if (buyable > 1)
+         {
+             constexpr auto question = "How many would you like to buy?";
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -145,6 +145,8 @@
+         "${CLIENT}/IO/Components/Slider.cpp" "${CLIENT}/IO/Components/NpcText.cpp"
+         "${CLIENT}/IO/Components/Textfield.cpp" "${CLIENT}/IO/UITypes/UINotice.cpp"
+         "${CLIENT}/Net/Handlers/ServerMessageHandler.cpp"
++        "${CLIENT}/Net/Handlers/ShopTransactionHandler.cpp"
++        "${CLIENT}/IO/UITypes/UIShop.cpp" "${CLIENT}/IO/Components/AreaButton.cpp"
+         "${CLIENT}/IO/Components/QuestText.cpp" "${CLIENT}/IO/UIElement.cpp"
+         "${CLIENT}/IO/UITypes/UIStatsInfo.cpp"
+         "${CLIENT}/Graphics/Texture.cpp" "${CLIENT}/Graphics/Text.cpp"
+--- a/tests/npc_notice_test.cpp
++++ b/tests/npc_notice_test.cpp
+@@ -4,6 +4,8 @@
+ #include "client/IO/UITypes/UINotice.h"
+ #include "client/IO/UI.h"
+ #include "client/IO/UITypes/UIStatusBar.h"
++#include "client/IO/UITypes/UIShop.h"
++#include "client/Net/Handlers/NpcInteractionHandlers.h"
+ #include "client/Net/Handlers/MessagingHandlers.h"
+ #include "client/Graphics/GraphicsGL.h"
+ #include "client/Audio/Audio.h"
+@@ -17,6 +19,7 @@
+     Textfield* focused = nullptr;
+     uint64_t press_id = 0;
+     std::vector<std::string> rendered_text;
++    std::vector<std::vector<int8_t>> sent_packets;
+     class NoticeState : public UIStateNull
+     {
+     public:
+@@ -64,6 +67,23 @@
+             }
+         }
+     };
++    class ShopWindow : public UIShop
++    {
++    public:
++        ShopWindow(const CharLook& look, const Inventory& inventory) : UIShop(look, inventory)
++        {
++            set_type(UIElement::SHOP);
++            restore_position({});
++        }
++        void click(size_t id)
++        {
++            const auto bounds = buttons.at(id)->bounds({});
++            const Point<int16_t> point((bounds.l() + bounds.r()) / 2, (bounds.t() + bounds.b()) / 2);
++            ++press_id;
++            send_cursor(true, point);
++            send_cursor(false, point);
++        }
++    };
+ }
+ 
+ namespace jrc
+@@ -92,6 +112,10 @@
+     void UI::focus_textfield(Textfield* field) { focused = field; }
+     void UI::blur_textfield(Textfield* field) { if (focused == field) focused = nullptr; }
+     void UI::remove_textfield() { focused = nullptr; }
++    void UI::clear_tooltip(Tooltip::Parent) {}
++    void UI::show_item(Tooltip::Parent, int32_t) {}
++    void UI::show_equip(Tooltip::Parent, int16_t) {}
++    void OutPacket::dispatch() { sent_packets.push_back(data()); }
+     Keyboard::Keyboard() {}
+     Cursor::Cursor() : state(IDLE), hide_counter(0) {}
+     ScrollingNotice::ScrollingNotice() : active(false) {}
+@@ -157,3 +181,112 @@
+     popup->send_key(KeyAction::RETURN, true, false);
+     CHECK_FALSE(popup->is_active());
+ }
++
++TEST_CASE("NPC shop rejections display mesos inventory stock and exchange failures")
++{
++    test_support::NxFile ui("UI.nx", nl::nx::ui);
++    const std::vector<std::pair<int, std::string>> errors = {
++        {1, "There are not enough items in stock."},
++        {2, "You do not have enough mesos to buy this item."},
++        {3, "Your inventory is full. Make room before buying this item."},
++        {5, "There are not enough items in stock."},
++        {13, "You do not have enough of the required items."},
++        {6, "The shop could not complete the transaction. Please try again."}
++    };
++    for (const auto& error : errors)
++    {
++        test_support::PacketFixture packet(0x132);
++        packet.write_byte(error.first);
++        auto input = packet.input();
++        ShopTransactionHandler handler;
++        static_cast<const PacketHandler&>(handler).handle(input);
++        CHECK_FALSE(input.available());
++        auto popup = UI::get().get_element<UIOk>();
++        REQUIRE(popup);
++        REQUIRE(popup->is_active());
++        rendered_text.clear();
++        popup->draw(1.0f);
++        CHECK(std::find(rendered_text.begin(), rendered_text.end(), error.second) != rendered_text.end());
++        popup->send_key(KeyAction::RETURN, true, false);
++        for (int code : {0, 8})
++        {
++            test_support::PacketFixture success(0x132);
++            success.write_byte(code);
++            auto response = success.input();
++            static_cast<const PacketHandler&>(handler).handle(response);
++            CHECK_FALSE(popup->is_active());
++        }
++    }
++}
++
++TEST_CASE("NPC shop Buy explains missing selection and sends the selected potion quantity")
++{
++    test_support::NxFile ui("UI.nx", nl::nx::ui);
++    test_support::NxFile items("Item.nx", nl::nx::item);
++    test_support::NxFile strings("String.nx", nl::nx::string);
++    test_support::NxFile npcs("Npc.nx", nl::nx::npc);
++    Inventory inventory;
++    CharLook look;
++    ShopWindow shop(look, inventory);
++    shop.reset(1031100);
++    shop.add_item(2000000, 50, 0, 0, 1000);
++    sent_packets.clear();
++    shop.click(0);
++    auto explanation = UI::get().get_element<UIOk>();
++    REQUIRE(explanation);
++    REQUIRE(explanation->is_active());
++    CHECK(sent_packets.empty());
++    explanation->send_key(KeyAction::RETURN, true, false);
++    shop.click(13);
++    shop.click(0);
++    auto quantity = UI::get().get_element<UIEnterNumber>();
++    REQUIRE(quantity);
++    REQUIRE(quantity->is_active());
++    REQUIRE(focused != nullptr);
++    focused->change_text("5");
++    quantity->send_key(KeyAction::RETURN, true, false);
++    REQUIRE(sent_packets.size() == 1);
++    InPacket purchase(sent_packets[0].data(), sent_packets[0].size());
++    CHECK(purchase.read_short() == 0x3d);
++    CHECK(purchase.read_byte() == 0);
++    CHECK(purchase.read_short() == 0);
++    CHECK(purchase.read_int() == 2000000);
++    CHECK(purchase.read_short() == 5);
++    CHECK_FALSE(purchase.available());
++    shop.click(0);
++    quantity = UI::get().get_element<UIEnterNumber>();
++    REQUIRE(quantity->is_active());
++    quantity->send_key(0, true, true);
++    CHECK_FALSE(quantity->is_active());
++    CHECK(sent_packets.size() == 1);
++}
++
++TEST_CASE("NPC shop equipment and rechargeable ammo request one item or full pack")
++{
++    test_support::NxFile ui("UI.nx", nl::nx::ui);
++    test_support::NxFile items("Item.nx", nl::nx::item);
++    test_support::NxFile characters("Character.nx", nl::nx::character);
++    test_support::NxFile strings("String.nx", nl::nx::string);
++    test_support::NxFile npcs("Npc.nx", nl::nx::npc);
++    Inventory inventory;
++    CharLook look;
++    for (int32_t id : {1302000, 2070000, 2330000})
++    {
++        ShopWindow shop(look, inventory);
++        shop.reset(1031100);
++        shop.add_item(id, 500, 0, 0, 1000);
++        sent_packets.clear();
++        shop.click(13);
++        shop.click(0);
++        auto confirmation = UI::get().get_element<UIYesNo>();
++        REQUIRE(confirmation);
++        REQUIRE(confirmation->is_active());
++        confirmation->send_key(KeyAction::RETURN, true, false);
++        REQUIRE(sent_packets.size() == 1);
++        InPacket purchase(sent_packets[0].data(), sent_packets[0].size());
++        purchase.skip(5);
++        CHECK(purchase.read_int() == id);
++        CHECK(purchase.read_short() == 1);
++        CHECK_FALSE(purchase.available());
++    }
++}
+--- /dev/null
++++ b/src/client/Net/Handlers/ShopTransactionHandler.cpp
+@@ -0,0 +1,37 @@
++#include "NpcInteractionHandlers.h"
++
++#include "../../IO/UI.h"
++#include "../../IO/UITypes/UINotice.h"
++
++namespace jrc
++{
++    void ShopTransactionHandler::handle(InPacket& recv) const
++    {
++        const auto code = static_cast<uint8_t>(recv.read_byte());
++        const char* message;
++        switch (code)
++        {
++        case 0:
++        case 8:
++            // Successful purchases and sales update inventory and mesos separately.
++            return;
++        case 1:
++        case 5:
++            message = "There are not enough items in stock.";
++            break;
++        case 2:
++            message = "You do not have enough mesos to buy this item.";
++            break;
++        case 3:
++            message = "Your inventory is full. Make room before buying this item.";
++            break;
++        case 13:
++            message = "You do not have enough of the required items.";
++            break;
++        default:
++            message = "The shop could not complete the transaction. Please try again.";
++            break;
++        }
++        UI::get().emplace<UIOk>(message, [] {});
++    }
++}
