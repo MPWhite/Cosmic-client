@@ -1,0 +1,110 @@
+diff --git a/src/client/Net/Handlers/Helpers/LoginParser.cpp b/src/client/Net/Handlers/Helpers/LoginParser.cpp
+--- a/src/client/Net/Handlers/Helpers/LoginParser.cpp
++++ b/src/client/Net/Handlers/Helpers/LoginParser.cpp
+@@ -121,7 +121,8 @@
+             statsentry.petids.push_back(recv.read_long());
+         }
+ 
+-        statsentry.stats[Maplestat::LEVEL] = recv.read_byte();
++        // v83 levels use the full unsigned byte range (including levels 128-200).
++        statsentry.stats[Maplestat::LEVEL] = static_cast<uint8_t>(recv.read_byte());
+         statsentry.stats[Maplestat::JOB]   = recv.read_short();
+         statsentry.stats[Maplestat::STR]   = recv.read_short();
+         statsentry.stats[Maplestat::DEX]   = recv.read_short();
+diff --git a/src/client/Net/Handlers/PlayerHandlers.cpp b/src/client/Net/Handlers/PlayerHandlers.cpp
+--- a/src/client/Net/Handlers/PlayerHandlers.cpp
++++ b/src/client/Net/Handlers/PlayerHandlers.cpp
+@@ -99,7 +99,7 @@
+             player.change_look(stat, recv.read_int());
+             break;
+         case Maplestat::LEVEL:
+-            player.change_level(recv.read_byte());
++            player.change_level(static_cast<uint8_t>(recv.read_byte()));
+             break;
+         case Maplestat::JOB:
+             player.change_job(recv.read_short());
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -96,6 +96,9 @@
+ client_test(npc_menu_test unit)
+ client_test(npc_packet_test unit)
+ client_test(login_inventory_layout_test unit)
++client_test(character_stats_packet_test unit)
++target_sources(character_stats_packet_test PRIVATE
++    "${CLIENT}/Net/Handlers/Helpers/LoginParser.cpp")
+ client_test(viewport_camera_test unit)
+ 
+ if(TEST_ASSETS)
+diff --git a/tests/character_stats_packet_test.cpp b/tests/character_stats_packet_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/character_stats_packet_test.cpp
+@@ -0,0 +1,67 @@
++#include "support/packet_fixture.h"
++#include "client/Net/Handlers/Helpers/LoginParser.h"
++
++#include <limits>
++
++using namespace jrc;
++using test_support::PacketFixture;
++
++namespace
++{
++    PacketFixture character_stats(uint8_t level, int32_t exp)
++    {
++        PacketFixture packet;
++        for (const char c : std::string("Admin"))
++            packet.write_byte(c);
++        packet.skip(8); // Character names occupy exactly 13 bytes.
++        packet.write_byte(0); // Gender.
++        packet.write_byte(0); // Skin.
++        packet.write_int(20000); // Face.
++        packet.write_int(30000); // Hair.
++        for (int i = 0; i < 3; ++i)
++            packet.write_long(0); // Pet IDs.
++        packet.write_byte(static_cast<int8_t>(level));
++        packet.write_short(410); // Assassin.
++        for (const int16_t stat : {4, 25, 4, 400, 2714, 3892, 2154, 2327, 181, 0})
++            packet.write_short(stat);
++        packet.write_int(exp);
++        packet.write_short(12); // Fame.
++        packet.write_int(0); // Gachapon EXP.
++        packet.write_int(103000000); // Kerning City.
++        packet.write_byte(3); // Portal.
++        packet.write_int(0); // Timestamp.
++        return packet;
++    }
++}
++
++TEST_CASE("Character snapshots preserve unsigned levels across the signed-byte boundary")
++{
++    for (const uint16_t level : {1, 127, 128, 129, 199, 200, 255})
++    {
++        CAPTURE(level);
++        const auto packet = character_stats(static_cast<uint8_t>(level), 23'369'058);
++        auto input = packet.input();
++        const auto stats = LoginParser::parse_stats(input);
++        CHECK(stats.stats[Maplestat::LEVEL] == level);
++        CHECK(stats.exp == 23'369'058);
++        CHECK(stats.stats[Maplestat::JOB] == 410);
++        CHECK(stats.stats[Maplestat::HP] == 2714);
++        CHECK(stats.stats[Maplestat::AP] == 181);
++        CHECK(stats.mapid == 103000000);
++        CHECK(stats.portal == 3);
++        CHECK_FALSE(input.available());
++    }
++}
++
++TEST_CASE("High-level character EXP retains the full positive 32-bit wire value")
++{
++    for (const int32_t exp : {0, 23'369'058, 1'697'576'959, std::numeric_limits<int32_t>::max()})
++    {
++        CAPTURE(exp);
++        const auto packet = character_stats(200, exp);
++        auto input = packet.input();
++        const auto stats = LoginParser::parse_stats(input);
++        CHECK(stats.exp == exp);
++        CHECK_FALSE(input.available());
++    }
++}
